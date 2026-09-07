@@ -22,6 +22,7 @@ import (
 	"mcpx/internal/audit"
 	"mcpx/internal/auth"
 	"mcpx/internal/config"
+	"mcpx/internal/control"
 	"mcpx/internal/deletion"
 	"mcpx/internal/envelope"
 	"mcpx/internal/environment"
@@ -57,6 +58,7 @@ type Runtime struct {
 	cfg             config.Config
 	reg             *workspace.Registry
 	approvals       *approval.Store
+	control         *control.Store
 	audit           *audit.Logger
 	globalCfgPath   string
 	tasks           *terminal.TaskManager
@@ -226,6 +228,11 @@ func New(opts Options) (*Runtime, error) {
 			Date:    firstNonEmpty(opts.Date, "unknown"),
 		},
 	}
+	runtime.control, err = control.New(stateStore.DB())
+	if err != nil {
+		_ = runtime.Close()
+		return nil, fmt.Errorf("initialize operator control: %w", err)
+	}
 	obsStore := observation.NewStore(stateStore.DB())
 	obsBroker := observation.NewBroker()
 	bridge := &observationBridge{
@@ -374,6 +381,7 @@ func (r *Runtime) Start() error {
 		Stateless:                  true,
 	})
 	gw := NewGateway(r.cfg, r.oauth, streamable)
+	gw.console = r.consoleHandler()
 
 	log := logging.With("component", "server")
 	log.Info("listening", "addr", addr, "transport", "streamable-http")

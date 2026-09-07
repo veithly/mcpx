@@ -1,0 +1,59 @@
+.app-shell { display: flex; height: 100dvh; overflow: hidden; }
+.sidebar { width: 266px; flex-shrink: 0; background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 18px 12px 12px; }
+.sidebar-header { display: flex; align-items: center; justify-content: space-between; padding: 2px 9px 21px; }
+.sidebar-header .brand-mark { width: 29px; height: 29px; border-radius: 8px; }
+.app-tag { font-size: 8px; letter-spacing: .11em; color: var(--muted); }
+.new-workspace { padding: 10px 12px; display: flex; align-items: center; gap: 9px; border: 1px solid var(--border); background: var(--panel); border-radius: 8px; text-align: left; font-size: 12px; box-shadow: 0 1px 2px #24272204; }
+.new-workspace:hover { border-color: var(--faint); }
+.sidebar-search { display: flex; gap: 8px; align-items: center; padding: 14px 10px; color: var(--muted); }
+.sidebar-search input { width: 100%; border: 0; background: transparent; font-size: 12px; }
+.sidebar-section-label { display: flex; justify-content: space-between; margin: 5px 10px 10px; font-size: 10px; font-weight: 500; color: var(--muted); }
+.workspace-list { min-height: 0; flex: 1; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.workspace-group { margin-bottom: 15px; }
+.workspace-row { display: flex; align-items: center; height: 33px; border-radius: 6px; }
+.group-toggle { display: grid; place-items: center; width: 24px; height: 30px; padding: 0; color: var(--muted); }
+.workspace-name { padding: 0; display: flex; align-items: center; gap: 8px; text-align: left; font-size: 12px; font-weight: 600; flex: 1; min-width: 0; height: 100%; }
+.workspace-name > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-count { color: var(--accent); margin-right: 10px; font-size: 10px; }
+.workspace-row:hover, .session-row:hover { background: var(--hover); }
+.workspace-row.selected, .session-row.selected { background: var(--selected); }
+.session-list { padding: 3px 0 0 20px; }
+.session-row { display: flex; align-items: flex-start; gap: 9px; width: 100%; text-align: left; padding: 10px 9px; border-radius: 7px; }
+.session-row > .status-dot { margin-top: 7px; }
+.session-copy { min-width: 0; }
+.session-copy > span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+.session-copy small { display: block; margin-top: 3px; font-size: 10px; color: var(--muted); }
+.sidebar-empty { font-size: 11px; color: var(--muted); padding: 8px 12px; }
+.sidebar-footer { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 6px; }
+.sidebar-footer > button { display: flex; gap: 9px; padding: 8px 10px; align-items: center; width: 100%; font-size: 12px; border-radius: 7px; }
+.sidebar-footer > button:hover { background: var(--hover); }
+.sidebar-footer > div { display: flex; align-items: center; margin-top: 8px; padding-left: 10px; }
+.runtime-version { font-size: 10px; color: var(--muted); flex: 1; }
+.workspace-main { display: flex; flex: 1; min-width: 0; flex-direction: column; }
+.main-header { height: 64px; padding: 0 30px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.breadcrumb { display: flex; gap: 10px; align-items: center; min-width: 0; color: var(--muted); font-size: 12px; }
+.breadcrumb strong { font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.header-status { display: flex; align-items: center; gap: 18px; flex-shrink: 0; }
+.connection { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--muted); }
+.connection i { width: 5px; height: 5px; border-radius: 50%; background: var(--faint); }
+.connection.live i { background: #79a251; }
+.connection.offline i, .connection.reconnecting i { background: #cb9452; }
+.access-badge { display: flex; gap: 6px; align-items: center; border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 10px; }
+.access-badge.full_access { color: var(--warning); background: var(--warning-bg); }
+.workspace-content { width: 100%; max-width: 1080px; align-self: center; padding: 31px 52px 15px; display: flex; flex-direction: column; flex: 1; min-height: 0; position: relative; }
+.workspace-heading { display: flex; gap: 15px; justify-content: space-between; align-items: center; padding-bottom: 22px; }
+.workspace-heading > div { min-width: 0; }
+.workspace-heading h1 { font-size: 24px; font-weight: 600; letter-spacing: -.7px; margin: 5px 0; line-height: 1.4; overflow-wrap: anywhere; }
+.workspace-heading p { font-size: 12px; color: var(--muted); line-height: 1.7; max-height: 3.4em; overflow: hidden; overflow-wrap: anywhere; }
+.running-pill { display: flex; align-items: center; gap: 6px; flex-shrink: 0; font-size: 10px; padding: 5px 8px; color: var(--accent); background: var(--accent-soft); border-radius: 6px; }
+.tabs { display: flex; gap: 22px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.tabs button { display: flex; align-items: center; gap: 7px; padding: 10px 0 12px; border-bottom: 2px solid transparent; margin-bottom: -1px; color: var(--muted); font-size: 12px; }
+.tabs button.active { color: var(--text); border-bottom-color: var(--text); }
+.tab-count { font-size: 9px; border-radius: 5px; padding: 1px 5px; background: var(--hover); color: var(--accent); }
+.content-scroll { min-height: 0; flex: 1; overflow: auto; scrollbar-width: thin; scrollbar-color: var(--border) transparent; padding-right: 3px; }
+.global-error { display: flex; justify-content: space-between; gap: 15px; align-items: center; padding: 8px 30px; color: var(--danger); border-bottom: 1px solid var(--border); font-size: 11px; }
+.global-error button { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.approval-banner { display: flex; gap: 8px; align-items: center; width: 100%; background: var(--warning-bg); color: var(--warning); padding: 10px 12px; border-radius: 7px; margin: 15px 0 0; text-align: left; font-size: 11px; }
+.approval-banner svg:last-child { margin-left: auto; }
+.jump-latest { align-self: center; display: flex; gap: 5px; align-items: center; position: absolute; bottom: 195px; border: 1px solid var(--border); background: var(--panel); border-radius: 20px; padding: 6px 12px; box-shadow: var(--shadow); font-size: 10px; }
+.welcome-add { display: flex; margin: 0 auto 35px; }

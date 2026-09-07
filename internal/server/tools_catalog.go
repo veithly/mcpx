@@ -253,6 +253,7 @@ func withEmbeddedActivitySchema(tool mcp.Tool) mcp.Tool {
 	inject := func(properties map[string]any) {
 		if properties != nil {
 			properties["activity"] = activityInputSchema()
+			properties["acknowledge_requests"] = map[string]any{"type": "array", "maxItems": 16, "items": map[string]any{"type": "string"}, "description": "已读 operator_control.requests 的原始 ID；同一 remote_session_id 的显式回执。确认已理解变更后再选择下一动作，不代表任务已经完成。"}
 		}
 	}
 	rootProperties, _ := schema["properties"].(map[string]any)

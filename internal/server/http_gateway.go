@@ -18,6 +18,7 @@ type Gateway struct {
 	oauth      *oauth.Server
 	oauthHTTP  *oauth.Handler
 	mcp        http.Handler
+	console    http.Handler
 	trustProxy bool
 }
 
@@ -61,6 +62,12 @@ func (g *Gateway) Handler() http.Handler {
 		mux.HandleFunc(oauth.MCPOAuthPrefix+"/token", g.cors(h.HandleToken))
 	}
 	// Exact /mcp only for Streamable MCP. /mcp/oauth/* registered above wins (longer path).
+	if g.console != nil {
+		mux.Handle(consoleRoot, g.console)
+		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, consoleRoot, http.StatusTemporaryRedirect)
+		})
+	}
 	mux.Handle("/mcp", g.corsHandler(g.accessLog(g.wrapMCP(g.mcp))))
 	return mux
 }

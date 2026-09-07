@@ -8,6 +8,8 @@
 # 桌面端前端依赖。构建产物 internal/desktop/frontend/dist/ 必须提交，
 # 否则 go:embed 在没有 npm 的环境下无法编译。
 internal/desktop/frontend/node_modules/
+internal/webui/frontend/node_modules/
 
 # local product docs (not in repo)
 .superpowers
+.codegraph/

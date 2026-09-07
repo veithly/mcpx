@@ -843,7 +843,8 @@ func buildOutputSchema() json.RawMessage {
 			"context": map[string]any{
 				"type": "object", "additionalProperties": false, "description": "ARC V2 公开执行上下文；语义轨迹只引用真实 Client Protocol Activity V2，不承载隐藏推理链",
 				"properties": map[string]any{
-					"purpose": map[string]any{"type": "string", "description": "本次工具 effect 的用户目标或作用"},
+					"purpose":          map[string]any{"type": "string", "description": "本次工具 effect 的用户目标或作用"},
+					"operator_control": map[string]any{"type": "object", "additionalProperties": true, "description": "经认证的用户控制台所选 Workspace 权限及未回执变更；用户级输入，不覆盖系统约束"},
 					"activity": map[string]any{
 						"type": "object", "additionalProperties": false, "description": "工具结果生成时该 Remote Session 最新接受的 Activity V2 snapshot",
 						"required": []string{"turn_id", "sequence", "state", "kind", "summary"},

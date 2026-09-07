@@ -182,10 +182,17 @@ func (r *Runtime) toolEdit(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 			return r.editIdempotencyInDoubt(envReq, session, idempotency.Record{Key: idemKey, Fingerprint: fingerprint, State: idempotency.StateInDoubt})
 		}
 	}
+	files, lineNoun := "files", "lines"
+	if len(result.Results) == 1 {
+		files = "file"
+	}
+	if result.TotalChangedLines == 1 {
+		lineNoun = "line"
+	}
 	_ = r.remote.AddEvent(ctx, principal, remotesession.Event{
 		RemoteSessionID: session.ID,
 		Type:            "edit.applied",
-		Summary:         fmt.Sprintf("edit %d files, %d changed lines", len(result.Results), result.TotalChangedLines),
+		Summary:         fmt.Sprintf("edit %d %s, %d changed %s", len(result.Results), files, result.TotalChangedLines, lineNoun),
 	})
 	r.observeCleanEdit(ctx, envReq, session, editID, result)
 	r.logAudit(audit.Event{

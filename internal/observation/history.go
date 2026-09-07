@@ -11,6 +11,8 @@ import (
 // HistoryQuery is the typed filter set exposed by workspace_history_read.
 // Scalar filters are ANDed; values inside one slice are ORed.
 type HistoryQuery struct {
+	AfterSequence    int64
+	Ascending        bool
 	Workspace        string
 	SessionID        string
 	CallID           string
@@ -89,13 +91,19 @@ func (s *Store) Query(ctx context.Context, query HistoryQuery) ([]Event, string,
 		args = append(args, cursor)
 	}
 
+	order := "DESC"
+	if query.Ascending {
+		order = "ASC"
+		where = append(where, "sequence > ?")
+		args = append(args, query.AfterSequence)
+	}
 	statement := `SELECT sequence, workspace_name,
 	        remote_session_id, request_id, call_id, turn_id, activity_sequence, activity_kind, related_call_id, operation_id, tool_name, event_type, phase,
 		intent, progress_summary, input_json, output_json, summary, status, purpose, goal, reasoning_summary, next_step, plan_id, plan_task_id, execution_task_id, parent_operation_id, step_id,
         command, working_directory, exit_code, duration_ms, skill_name, mcp_server, mcp_tool, path,
         resource_uri, stream, stream_offset, truncated, created_at
         FROM observation_events WHERE ` + strings.Join(where, " AND ") + `
-        ORDER BY sequence DESC LIMIT ?`
+        ORDER BY sequence ` + order + ` LIMIT ?`
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, statement, args...)
 	if err != nil {

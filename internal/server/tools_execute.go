@@ -82,11 +82,22 @@ func (r *Runtime) cleanExecuteReadyForIdempotency(ctx context.Context, req *mcp.
 	if decision != security.Confirm {
 		return true
 	}
-	if !boolPayload(envReq.Payload, "user_confirmed") {
-		return false
-	}
 	digest := commandRequestDigestWithPayload(envReq.RequestID, remote.ID, remote.WorkspaceName, command, purpose, scope, payloadDigest)
-	if _, ok := r.pendingCommandConfirmation(remote.ID, principal.ID, command, scope, digest); ok {
+	if pending, ok := r.pendingCommandConfirmation(remote.ID, principal.ID, command, scope, digest); ok {
+		if r.control != nil {
+			decision, err := r.control.Decision(ctx, pending.ID, digest)
+			if err != nil || decision == "denied" {
+				return false
+			}
+			if decision == "approved" {
+				return true
+			}
+		}
+		if boolPayload(envReq.Payload, "user_confirmed") {
+			return true
+		}
+	}
+	if r.workspaceFullAccess(ctx, remote.WorkspaceName) {
 		return true
 	}
 	// After the approval is consumed, an idempotent retry must still reach

@@ -139,6 +139,8 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 				err = nil
 			}
 		}()
+		operatorAcks := mcpresult.Arguments(req)["acknowledge_requests"]
+		req = withoutOperatorAcks(req)
 		received := time.Now()
 		callCtx, runtime := ensureRuntimeContext(ctx, mcpresult.Header(req), received)
 		runtime.StartedAtMs = toolRequestStartedAtMs(req, received)
@@ -160,6 +162,9 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 		observedArguments := observationArguments(name, arguments)
 		var embeddedActivityErr error
 		if !internalOperationStep && observationParseErr == nil {
+			embeddedActivityErr = r.acknowledgeOperatorRequests(callCtx, observationRequest, operatorAcks)
+		}
+		if !internalOperationStep && observationParseErr == nil && embeddedActivityErr == nil {
 			embeddedActivityErr = r.recordEmbeddedAgentActivity(callCtx, observationRequest, runtime, received.UTC())
 		}
 		if !internalOperationStep && observationParseErr == nil && embeddedActivityErr == nil && r.observation != nil {
@@ -213,6 +218,9 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 					ProcessingMs: timing.ProcessingMs, ServerElapsedMs: timing.ServerElapsedMs,
 				},
 			}, result)
+		}
+		if !internalOperationStep && observationParseErr == nil {
+			r.appendOperatorContext(callCtx, observationRequest, name, req, result)
 		}
 		if !internalOperationStep && observationParseErr == nil && r.observation != nil {
 			_ = r.observation.RecordToolCompleted(callCtx, name, observationRequest, observedArguments, result, err, timing)

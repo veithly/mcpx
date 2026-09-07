@@ -123,6 +123,12 @@ func (h *Handler) HandleRegister(w http.ResponseWriter, r *http.Request) {
 
 // HandleAuthorize handles GET/POST /mcp/oauth/authorize.
 func (h *Handler) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Frame-Options", "DENY")
+	// OAuth POST redirects to the registered external client. Do not apply a
+	// self-only form-action policy to that redirect; the registry validates it.
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
 	switch r.Method {
 	case http.MethodGet:
 		h.authorizeGet(w, r)
@@ -394,37 +400,3 @@ func writeOAuthError(w http.ResponseWriter, status int, code, desc string) {
 		"error_description": desc,
 	})
 }
-
-const authorizeHTML = `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>MCPX 授权</title>
-<style>
-body{font-family:system-ui,sans-serif;max-width:28rem;margin:2rem auto;padding:0 1rem;line-height:1.5}
-label{display:block;margin:.75rem 0 .25rem}
-input[type=password]{width:100%%;padding:.5rem;box-sizing:border-box}
-button{margin-top:1rem;padding:.5rem 1rem;width:100%%}
-.meta{color:#555;font-size:.9rem;word-break:break-all}
-</style>
-</head>
-<body>
-<h1>MCPX 授权</h1>
-<p>客户端 <strong>%s</strong> 请求访问本 Runtime。</p>
-<p class="meta">回调：%s<br/>权限：%s</p>
-<form method="POST" action="%s">
-<label for="password">运维口令</label>
-<input id="password" name="password" type="password" required autocomplete="current-password"/>
-<input type="hidden" name="client_id" value="%s"/>
-<input type="hidden" name="redirect_uri" value="%s"/>
-<input type="hidden" name="code_challenge" value="%s"/>
-<input type="hidden" name="code_challenge_method" value="%s"/>
-<input type="hidden" name="state" value="%s"/>
-<input type="hidden" name="resource" value="%s"/>
-<input type="hidden" name="scope" value="%s"/>
-<button type="submit">授权</button>
-</form>
-</body>
-</html>
-`

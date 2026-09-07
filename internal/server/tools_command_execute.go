@@ -89,6 +89,8 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 		analysis = readonlySQLiteAnalysis(command)
 	}
 	decision := analysis.Decision
+	// Full access is evaluated inside the confirmation branch, after any
+	// explicit operator rejection of this exact pending command.
 	yieldForRequest := commandYield(envReq.Payload)
 	if runtimeSpec != nil {
 		yieldForRequest = ephemeralRuntimeWait(envReq.Payload)
@@ -117,9 +119,23 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 	case security.Confirm:
 		yield := yieldForRequest
 		confirmationToken := stringPayload(envReq.Payload, "confirmation_token")
+		fullAccess := r.workspaceFullAccess(ctx, remote.WorkspaceName)
 		if isCleanCoreRequest(ctx) {
-			userConfirmed := boolPayload(envReq.Payload, "user_confirmed")
+			userConfirmed := boolPayload(envReq.Payload, "user_confirmed") || fullAccess
 			pending, pendingOK := r.pendingCommandConfirmation(remote.ID, principal.ID, command, scope, commandDigest)
+			if pendingOK && r.control != nil {
+				decision, decisionErr := r.control.Decision(ctx, pending.ID, commandDigest)
+				if decisionErr != nil {
+					return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "approval_unavailable", "cannot read operator approval; execution remains blocked")
+				}
+				if decision == "denied" {
+					return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "denied", "operator denied this exact pending command")
+				}
+				userConfirmed = userConfirmed || decision == "approved"
+			}
+			if fullAccess && !pendingOK {
+				return executeApproved(yield)
+			}
 			if !userConfirmed || !pendingOK {
 				if !pendingOK {
 					var confirmationErr error
@@ -163,6 +179,9 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 				}
 			}
 			return result, executeErr
+		}
+		if fullAccess {
+			return executeApproved(yield)
 		}
 		if !r.hasPendingCommandConfirmation(remote.ID, principal.ID, command, purpose, scope, confirmationToken) {
 			pending, confirmationErr := r.approvals.PutPending(approval.Pending{

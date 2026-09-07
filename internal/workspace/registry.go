@@ -38,6 +38,25 @@ func NewRegistry(entries []config.WorkspaceEntry) (*Registry, error) {
 	return r, nil
 }
 
+// Register adds a validated, persisted workspace without replacing this registry
+// underneath active tool calls. Name collisions never redirect existing sessions.
+func (r *Registry) Register(entry config.WorkspaceEntry) error {
+	if entry.Name == "" || !filepath.IsAbs(entry.Path) {
+		return fmt.Errorf("invalid workspace entry")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if current, exists := r.byName[entry.Name]; exists {
+		if current.Path == entry.Path {
+			return nil
+		}
+		return fmt.Errorf("workspace name already registered")
+	}
+	r.byName[entry.Name] = Workspace{ID: entry.Name, Name: entry.Name, Path: entry.Path, Description: entry.Description}
+	r.order = append(r.order, entry.Name)
+	return nil
+}
+
 // List returns workspaces in registration order.
 func (r *Registry) List() []Workspace {
 	r.mu.RLock()
