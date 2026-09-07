@@ -201,6 +201,10 @@ func (r *Runtime) changeRequest(ctx context.Context, req *mcp.CallToolRequest, e
 		result, _ := r.remoteError(envReq, remoteSessionID, "", err)
 		return envReq, principal, remotesession.Session{}, result
 	}
+	if err := r.validateSessionWorkspace(ctx, envReq, session); err != nil {
+		result, _ := r.remoteError(envReq, remoteSessionID, session.WorkspaceName, err)
+		return envReq, principal, remotesession.Session{}, result
+	}
 	if edit && session.Role != "owner" && session.Role != "editor" {
 		result, _ := r.remoteError(envReq, remoteSessionID, session.WorkspaceName, remotesession.ErrForbidden)
 		return envReq, principal, remotesession.Session{}, result

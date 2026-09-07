@@ -31,6 +31,7 @@ type Request struct {
 	CreatedAt      int64  `json:"created_at"`
 	DeliveredAt    int64  `json:"delivered_at,omitempty"`
 	AcknowledgedAt int64  `json:"acknowledged_at,omitempty"`
+	CancelledAt    int64  `json:"cancelled_at,omitempty"`
 }
 
 func New(db *sql.DB) (*Store, error) {
@@ -38,6 +39,14 @@ func New(db *sql.DB) (*Store, error) {
 		return nil, errors.New("control requires a database")
 	}
 	_, err := db.Exec(`
+ CREATE TABLE IF NOT EXISTS console_items (
+  kind TEXT NOT NULL CHECK(kind IN ('workspace','session')), id TEXT NOT NULL,
+  workspace TEXT NOT NULL, pinned INTEGER NOT NULL DEFAULT 0,
+  position INTEGER NOT NULL DEFAULT 0, deleted_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(kind,id)
+ );
+ CREATE TABLE IF NOT EXISTS console_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+ INSERT OR IGNORE INTO console_revision(id,revision) VALUES(1,0);
  CREATE TABLE IF NOT EXISTS workspace_access (
   workspace TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('approval','full_access')), updated_at INTEGER NOT NULL
  );
@@ -46,6 +55,9 @@ func New(db *sql.DB) (*Store, error) {
   kind TEXT NOT NULL CHECK(kind IN ('steer','interrupt','approval')), body TEXT NOT NULL,
   client_key TEXT NOT NULL, created_at INTEGER NOT NULL, acknowledged_at INTEGER NOT NULL DEFAULT 0,
   UNIQUE(workspace, client_key)
+ );
+ CREATE TABLE IF NOT EXISTS operator_request_cancellations (
+  request_id TEXT PRIMARY KEY REFERENCES operator_requests(id) ON DELETE CASCADE, cancelled_at INTEGER NOT NULL
  );
  CREATE INDEX IF NOT EXISTS operator_requests_pending ON operator_requests(workspace, acknowledged_at, created_at);
  CREATE TABLE IF NOT EXISTS operator_deliveries (

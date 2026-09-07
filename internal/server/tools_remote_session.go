@@ -102,6 +102,9 @@ func (r *Runtime) remoteError(envReq envelope.Request, remoteSessionID, workspac
 		code = "remote_session_required"
 	}
 	message := err.Error()
+	if code == "workspace_not_found" {
+		message += "; use session(workspace_path=<user-specified existing absolute project path>) to register and open the intended project directly. Never borrow the mcpx workspace or choose the first workspace as a fallback."
+	}
 	if code == "not_found" {
 		message = "remote session not found：remote_session_id 必须原样复制 session 返回的完整值。如果 ID 已丢失或不确定，先调用 session(action=list) 发现已有会话，再用返回的完整 remote_session_id 调用 session(action=open) 恢复；不要直接创建新 Session。"
 	}
@@ -134,6 +137,30 @@ func (r *Runtime) remoteError(envReq envelope.Request, remoteSessionID, workspac
 
 func (r *Runtime) createRemoteSession(ctx context.Context, principal auth.Principal, envReq envelope.Request, workspaceName string) (remotesession.CreateResult, error) {
 	workspaceName = strings.TrimSpace(workspaceName)
+	// Registration and session creation must not interleave with removal.
+	r.consoleMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			r.consoleMu.Unlock()
+		}
+	}()
+	if path := strings.TrimSpace(stringPayload(envReq.Payload, "workspace_path")); path != "" {
+		ws, _, err := r.registerProject(ctx, path, workspaceName)
+		if err != nil {
+			return remotesession.CreateResult{}, err
+		}
+		workspaceName = ws.Name
+	}
+	if r.control != nil {
+		removed, err := r.control.Deleted(ctx, workspaceName, "")
+		if err != nil {
+			return remotesession.CreateResult{}, err
+		}
+		if removed {
+			return remotesession.CreateResult{}, fmt.Errorf("%w: workspace removed; add it again in the operator console", errWorkspaceNotFound)
+		}
+	}
 	ws, ok := r.reg.Get(workspaceName)
 	if !ok {
 		return remotesession.CreateResult{}, fmt.Errorf("%w: %q", errWorkspaceNotFound, workspaceName)
@@ -150,6 +177,19 @@ func (r *Runtime) createRemoteSession(ctx context.Context, principal auth.Princi
 	})
 	if err != nil {
 		return remotesession.CreateResult{}, err
+	}
+	r.consoleMu.Unlock()
+	locked = false
+	if result.ResumeTokenAlreadyIssued {
+		// Cached bootstrap JSON omits WorkspacePath. Reload the authoritative binding.
+		stored, err := r.remote.Get(ctx, principal, result.Session.ID)
+		if err != nil {
+			return remotesession.CreateResult{}, err
+		}
+		if err := r.validateSessionWorkspace(ctx, envReq, stored); err != nil {
+			return remotesession.CreateResult{}, err
+		}
+		result.Session = stored
 	}
 	if err := r.ensureSessionEnvironment(ctx, principal, &result); err != nil {
 		r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: result.Session.ID, Workspace: workspaceName, Tool: "environment_snapshot", Status: "error", Detail: map[string]any{"error": err.Error()}})
@@ -187,6 +227,20 @@ func (r *Runtime) toolRemoteSessionList(ctx context.Context, req *mcp.CallToolRe
 	})
 	if err != nil {
 		return r.remoteError(envReq, "", workspaceName, err)
+	}
+	if r.control != nil {
+		state, err := r.control.Sidebar(ctx)
+		if err != nil {
+			return r.remoteError(envReq, "", workspaceName, err)
+		}
+		prefs := sidebarPreference(state.Items)
+		visible := make([]remotesession.Session, 0, len(result.Sessions))
+		for _, session := range result.Sessions {
+			if prefs[sidebarKey("workspace", session.WorkspaceName)].DeletedAt == 0 && prefs[sidebarKey("session", session.ID)].DeletedAt == 0 {
+				visible = append(visible, session)
+			}
+		}
+		result.Sessions = visible // Keep the source cursor, including for a fully hidden page.
 	}
 	return r.remoteResult(envReq, "", workspaceName, result)
 }

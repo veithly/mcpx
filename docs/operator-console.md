@@ -8,15 +8,15 @@ React 工作台挂载于现有 Go HTTP 服务的 `/mcp/app/`，管理 API 位于
 
 源码入口：`internal/webui/frontend/src/App.tsx`。生产静态资源由 `internal/webui/assets.go` 嵌入 Go 二进制，部署后的机器不需要 Node。
 
-**当前开发检查点：React 源码已写入，但首次 npm 安装被当前运行实例的确认策略拦截，尚未生成锁文件或正式 dist。`frontend/dist/index.html` 仍是构建提示页。不得将它当作已完成的浏览器 UI 验收或发布产物。**
+前端依赖与锁文件现已就绪，TypeScript 检查及 Vite 正式构建已通过。侧栏支持持久化置顶、同组拖动排序和工作台软删除；运行会话优先显示。具体行为、项目绑定修复和验收方法见 [工作台组织与项目归属](workbench-organization.md)。
 
 ## 构建
 
 需要项目 Go 工具链，以及 Node 22.12 或更高版本。以下命令在仓库根目录执行：
 
 ```sh
-# 首次安装需由操作员批准当前 Runtime 的安装操作。
-npm install --prefix internal/webui/frontend
+# 依赖安装遵循当前 Runtime 的访问策略；使用锁文件安装。
+npm ci --prefix internal/webui/frontend
 npm --prefix internal/webui/frontend run build
 
 # 打包的是刚刚构建的 dist，不是 Vite 开发服务器。

@@ -31,12 +31,11 @@ type loginWindow struct {
 	Count   int
 }
 type consoleHandler struct {
-	runtime    *Runtime
-	mu         sync.Mutex
-	mutationMu sync.Mutex
-	sessions   map[string]operatorSession
-	attempts   map[string]loginWindow
-	streams    int
+	runtime  *Runtime
+	mu       sync.Mutex
+	sessions map[string]operatorSession
+	attempts map[string]loginWindow
+	streams  int
 }
 
 func (r *Runtime) consoleHandler() http.Handler {
@@ -46,6 +45,7 @@ func (r *Runtime) consoleHandler() http.Handler {
 	mux.HandleFunc("POST "+consoleAPI+"session", c.login)
 	mux.HandleFunc("DELETE "+consoleAPI+"session", c.require(c.logout))
 	mux.HandleFunc("GET "+consoleAPI+"state", c.require(c.state))
+	mux.HandleFunc("POST "+consoleAPI+"sidebar", c.require(c.sidebar))
 	mux.HandleFunc("GET "+consoleAPI+"fs", c.require(c.browse))
 	mux.HandleFunc("POST "+consoleAPI+"workspaces", c.require(c.addWorkspace))
 	mux.HandleFunc("PUT "+consoleAPI+"access", c.require(c.setAccess))

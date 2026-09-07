@@ -24,6 +24,15 @@ func (s *Store) Enqueue(ctx context.Context, workspace, session, kind, body, key
 		return Request{}, err
 	}
 	defer tx.Rollback()
+	// Check removal in the same transaction as enqueue. A request that passed
+	// the HTTP check before deletion must not enter the queue afterwards.
+	var removed int
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM console_items WHERE deleted_at>0 AND ((kind='workspace' AND id=?) OR (kind='session' AND id=?))`, workspace, session).Scan(&removed); err != nil {
+		return Request{}, err
+	}
+	if removed > 0 {
+		return Request{}, errors.New("workspace or conversation has been removed")
+	}
 	var existing Request
 	err = tx.QueryRowContext(ctx, `SELECT id, workspace, session_id, kind, body, created_at, acknowledged_at FROM operator_requests WHERE workspace=? AND client_key=?`, workspace, key).Scan(&existing.ID, &existing.Workspace, &existing.SessionID, &existing.Kind, &existing.Body, &existing.CreatedAt, &existing.AcknowledgedAt)
 	if err == nil {
@@ -34,6 +43,12 @@ func (s *Store) Enqueue(ctx context.Context, workspace, session, kind, body, key
 		if existing.AcknowledgedAt > 0 {
 			existing.Status = "acknowledged"
 		}
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT cancelled_at FROM operator_request_cancellations WHERE request_id=?),0)`, existing.ID).Scan(&existing.CancelledAt); err != nil {
+			return Request{}, err
+		}
+		if existing.CancelledAt > 0 {
+			existing.Status = "cancelled"
+		}
 		existing.Replayed = true
 		return existing, nil
 	}
@@ -41,7 +56,7 @@ func (s *Store) Enqueue(ctx context.Context, workspace, session, kind, body, key
 		return Request{}, err
 	}
 	var count int
-	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM operator_requests WHERE workspace=? AND acknowledged_at=0`, workspace).Scan(&count); err != nil {
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM operator_requests WHERE workspace=? AND acknowledged_at=0 AND NOT EXISTS(SELECT 1 FROM operator_request_cancellations c WHERE c.request_id=operator_requests.id)`, workspace).Scan(&count); err != nil {
 		return Request{}, err
 	}
 	if count >= 200 {
@@ -68,7 +83,7 @@ func (s *Store) Deliver(ctx context.Context, workspace, session, call string) ([
 	}
 	defer tx.Rollback()
 	rows, err := tx.QueryContext(ctx, `SELECT id,workspace,session_id,kind,body,created_at FROM operator_requests
- WHERE workspace=? AND (session_id='' OR session_id=?) AND acknowledged_at=0 ORDER BY created_at,id LIMIT ?`, workspace, session, DeliveryLimit)
+ WHERE workspace=? AND (session_id='' OR session_id=?) AND acknowledged_at=0 AND NOT EXISTS(SELECT 1 FROM operator_request_cancellations c WHERE c.request_id=operator_requests.id) ORDER BY created_at,id LIMIT ?`, workspace, session, DeliveryLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +126,7 @@ func (s *Store) Acknowledge(ctx context.Context, workspace, session string, ids 
 			return errors.New("invalid request acknowledgement")
 		}
 		result, err := tx.ExecContext(ctx, `UPDATE operator_requests SET acknowledged_at=CASE WHEN acknowledged_at=0 THEN ? ELSE acknowledged_at END
-  WHERE id=? AND workspace=? AND (session_id='' OR session_id=?) AND EXISTS(SELECT 1 FROM operator_deliveries d WHERE d.request_id=operator_requests.id AND d.session_id=?)`, time.Now().UnixMilli(), id, workspace, session, session)
+  WHERE id=? AND workspace=? AND (session_id='' OR session_id=?) AND NOT EXISTS(SELECT 1 FROM operator_request_cancellations c WHERE c.request_id=operator_requests.id) AND EXISTS(SELECT 1 FROM operator_deliveries d WHERE d.request_id=operator_requests.id AND d.session_id=?)`, time.Now().UnixMilli(), id, workspace, session, session)
 		if err != nil {
 			return err
 		}
@@ -125,7 +140,8 @@ func (s *Store) Acknowledge(ctx context.Context, workspace, session string, ids 
 
 func (s *Store) List(ctx context.Context, workspace, session string) ([]Request, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.workspace,r.session_id,r.kind,r.body,r.created_at,r.acknowledged_at,
- COALESCE((SELECT MIN(delivered_at) FROM operator_deliveries d WHERE d.request_id=r.id),0)
+ COALESCE((SELECT MIN(delivered_at) FROM operator_deliveries d WHERE d.request_id=r.id),0),
+ COALESCE((SELECT cancelled_at FROM operator_request_cancellations c WHERE c.request_id=r.id),0)
  FROM operator_requests r WHERE workspace=? AND (?='' OR session_id='' OR session_id=?) ORDER BY created_at DESC,id DESC LIMIT 100`, workspace, session, session)
 	if err != nil {
 		return nil, err
@@ -134,7 +150,7 @@ func (s *Store) List(ctx context.Context, workspace, session string) ([]Request,
 	items := []Request{}
 	for rows.Next() {
 		var m Request
-		if err = rows.Scan(&m.ID, &m.Workspace, &m.SessionID, &m.Kind, &m.Body, &m.CreatedAt, &m.AcknowledgedAt, &m.DeliveredAt); err != nil {
+		if err = rows.Scan(&m.ID, &m.Workspace, &m.SessionID, &m.Kind, &m.Body, &m.CreatedAt, &m.AcknowledgedAt, &m.DeliveredAt, &m.CancelledAt); err != nil {
 			return nil, err
 		}
 		m.Status = "queued"
@@ -143,6 +159,9 @@ func (s *Store) List(ctx context.Context, workspace, session string) ([]Request,
 		}
 		if m.AcknowledgedAt > 0 {
 			m.Status = "acknowledged"
+		}
+		if m.CancelledAt > 0 {
+			m.Status = "cancelled"
 		}
 		items = append(items, m)
 	}

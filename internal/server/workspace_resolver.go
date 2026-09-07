@@ -25,6 +25,9 @@ func (r *Runtime) resolveExplicitWorkspace(ctx context.Context, principal auth.P
 		if err != nil {
 			return workspace.Workspace{}, remoteID, err
 		}
+		if err := r.validateSessionWorkspace(ctx, req, session); err != nil {
+			return workspace.Workspace{}, remoteID, err
+		}
 		if name != "" && name != session.WorkspaceName {
 			return workspace.Workspace{}, remoteID, fmt.Errorf("%w: workspace does not match Remote Session", remotesession.ErrInvalidInput)
 		}
@@ -39,6 +42,15 @@ func (r *Runtime) resolveExplicitWorkspace(ctx context.Context, principal auth.P
 	}
 	if name == "" {
 		return workspace.Workspace{}, "", nil
+	}
+	if r.control != nil {
+		removed, err := r.control.Deleted(ctx, name, "")
+		if err != nil {
+			return workspace.Workspace{}, "", err
+		}
+		if removed {
+			return workspace.Workspace{}, "", fmt.Errorf("%w: workspace removed", errWorkspaceNotFound)
+		}
 	}
 	registered, ok := r.reg.Get(name)
 	if !ok {

@@ -54,34 +54,37 @@ type Options struct {
 
 // Runtime is the MCPX process root.
 type Runtime struct {
-	opts            Options
-	cfg             config.Config
-	reg             *workspace.Registry
-	approvals       *approval.Store
-	control         *control.Store
-	audit           *audit.Logger
-	globalCfgPath   string
-	tasks           *terminal.TaskManager
-	secrets         *secrets.Store
-	oauth           *oauth.Server
-	state           *state.Store
-	remote          *remotesession.Service
-	environment     *environment.Service
-	workspaceDiff   *workspacechanges.Service
-	fileSnapshots   *filesnapshot.Store
-	artifacts       *artifact.Service
-	plans           *plan.Service
-	deletions       *deletion.Store
-	retention       *state.RetentionService
-	retentionCancel context.CancelFunc
-	retentionDone   chan struct{}
-	screenshot      screenCapturer
-	observation     *observationBridge
-	operations      *operation.Service
-	observerSocket  *observation.SocketServer
-	activityMu      sync.Mutex
-	closeOnce       sync.Once
-	closeErr        error
+	opts              Options
+	cfg               config.Config
+	reg               *workspace.Registry
+	approvals         *approval.Store
+	control           *control.Store
+	audit             *audit.Logger
+	globalCfgPath     string
+	tasks             *terminal.TaskManager
+	secrets           *secrets.Store
+	oauth             *oauth.Server
+	state             *state.Store
+	remote            *remotesession.Service
+	environment       *environment.Service
+	workspaceDiff     *workspacechanges.Service
+	fileSnapshots     *filesnapshot.Store
+	artifacts         *artifact.Service
+	plans             *plan.Service
+	deletions         *deletion.Store
+	retention         *state.RetentionService
+	retentionCancel   context.CancelFunc
+	retentionDone     chan struct{}
+	screenshot        screenCapturer
+	observation       *observationBridge
+	operations        *operation.Service
+	observerSocket    *observation.SocketServer
+	activityMu        sync.Mutex
+	consoleMu         sync.Mutex // serializes navigation mutations and call admission
+	workspaceConfigMu sync.Mutex
+	consoleCalls      map[string]consoleLiveCall
+	closeOnce         sync.Once
+	closeErr          error
 
 	// For schema revision and capability catalog.
 	toolIndex    map[string]mcp.Tool
@@ -232,6 +235,10 @@ func New(opts Options) (*Runtime, error) {
 	if err != nil {
 		_ = runtime.Close()
 		return nil, fmt.Errorf("initialize operator control: %w", err)
+	}
+	if _, err := stateStore.DB().Exec(`CREATE INDEX IF NOT EXISTS idx_console_session_activity ON observation_events(remote_session_id, created_at DESC)`); err != nil {
+		_ = runtime.Close()
+		return nil, err
 	}
 	obsStore := observation.NewStore(stateStore.DB())
 	obsBroker := observation.NewBroker()
@@ -976,6 +983,15 @@ func (r *Runtime) toolWorkspaceList(ctx context.Context, req *mcp.CallToolReques
 	list := r.reg.List()
 	items := make([]map[string]any, 0, len(list))
 	for _, w := range list {
+		if r.control != nil {
+			removed, err := r.control.Deleted(ctx, w.Name, "")
+			if err != nil {
+				return r.remoteError(envReq, "", w.Name, err)
+			}
+			if removed {
+				continue
+			}
+		}
 		items = append(items, map[string]any{
 			"name":        w.Name,
 			"path":        w.Path,
@@ -983,7 +999,7 @@ func (r *Runtime) toolWorkspaceList(ctx context.Context, req *mcp.CallToolReques
 		})
 	}
 	r.logAudit(audit.Event{RequestID: envReq.RequestID, Tool: "workspace", Status: "ok"})
-	return r.remoteResult(envReq, "", "", map[string]any{"workspaces": items})
+	return r.remoteResult(envReq, "", "", map[string]any{"workspaces": items, "project_selection": "Match the user's actual project path. For an unregistered project, call session(workspace_path=<explicit absolute path>) directly; never use mcpx or the first entry as a default."})
 }
 
 func (r *Runtime) effectiveConfig(wsPath string) config.Config {

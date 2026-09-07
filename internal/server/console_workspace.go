@@ -4,14 +4,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	"mcpx/internal/audit"
-	"mcpx/internal/config"
 	"mcpx/internal/control"
 	"mcpx/internal/observation"
 )
@@ -19,6 +15,15 @@ import (
 func (c *consoleHandler) target(ctx context.Context, workspace, session string) error {
 	if _, ok := c.runtime.reg.Get(workspace); !ok {
 		return errors.New("workspace not found")
+	}
+	if c.runtime.control != nil {
+		deleted, err := c.runtime.control.Deleted(ctx, workspace, session)
+		if err != nil {
+			return err
+		}
+		if deleted {
+			return errors.New("workspace or conversation has been removed")
+		}
 	}
 	if session != "" {
 		var stored string
@@ -30,51 +35,45 @@ func (c *consoleHandler) target(ctx context.Context, workspace, session string) 
 }
 
 func (c *consoleHandler) state(w http.ResponseWriter, r *http.Request) {
-	workspaces := []map[string]any{}
-	for _, ws := range c.runtime.reg.List() {
-		mode, err := c.runtime.control.Mode(r.Context(), ws.Name)
-		if err != nil {
-			consoleError(w, 500, "cannot read access settings")
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 3000 {
+			consoleError(w, 400, "invalid limit")
 			return
 		}
-		workspaces = append(workspaces, map[string]any{"name": ws.Name, "path": ws.Path, "description": ws.Description, "access_mode": mode})
+		limit = n
 	}
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-	if offset < 0 || offset > 100000 {
-		consoleError(w, 400, "invalid offset")
-		return
-	}
-	rows, err := c.runtime.state.DB().QueryContext(r.Context(), `SELECT rs.id,rs.workspace_name,rs.label,rs.description,rs.status,rs.last_active_at,
- (SELECT COUNT(*) FROM terminal_tasks t WHERE t.remote_session_id=rs.id AND t.status='running')
- FROM remote_sessions rs ORDER BY rs.last_active_at DESC,rs.id DESC LIMIT 101 OFFSET ?`, offset)
-	if err != nil {
-		consoleError(w, 500, "cannot load sessions")
-		return
-	}
-	sessions := []map[string]any{}
-	for rows.Next() {
-		var id, ws, label, description, status string
-		var active int64
-		var running int
-		if err = rows.Scan(&id, &ws, &label, &description, &status, &active, &running); err != nil {
-			rows.Close()
-			consoleError(w, 500, "cannot decode sessions")
+	offset := 0
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 || n > 100000 {
+			consoleError(w, 400, "invalid offset")
 			return
 		}
-		sessions = append(sessions, map[string]any{"id": id, "workspace": ws, "label": label, "description": description, "status": status, "last_active_at": active, "running_tasks": running})
+		offset = n
 	}
-	err = rows.Err()
-	rows.Close()
+	c.runtime.consoleMu.Lock()
+	workspaces, sessions, state, err := c.snapshot(r.Context())
+	c.runtime.consoleMu.Unlock()
 	if err != nil {
-		consoleError(w, 500, "cannot load sessions")
+		consoleError(w, 500, "cannot load sidebar")
 		return
 	}
+	total := len(sessions)
+	start := min(offset, total)
+	end := min(start+limit, total)
 	next := 0
-	if len(sessions) > 100 {
-		sessions = sessions[:100]
-		next = offset + 100
+	if end < total {
+		next = end
 	}
-	consoleJSON(w, 200, map[string]any{"workspaces": workspaces, "sessions": sessions, "next_offset": next, "version": c.runtime.build.Version, "server_time": time.Now().UnixMilli()})
+	removed := []string{}
+	for _, item := range state.Items {
+		if item.Kind == "session" && item.DeletedAt > 0 {
+			removed = append(removed, item.ID)
+		}
+	}
+	consoleJSON(w, 200, map[string]any{"removed_session_ids": removed, "workspaces": workspaces, "sessions": sessions[start:end], "next_offset": next, "total_sessions": total, "sidebar_revision": state.Revision, "version": c.runtime.build.Version, "server_time": time.Now().UnixMilli()})
 }
 
 func (c *consoleHandler) addWorkspace(w http.ResponseWriter, r *http.Request) {
@@ -85,77 +84,27 @@ func (c *consoleHandler) addWorkspace(w http.ResponseWriter, r *http.Request) {
 		consoleError(w, 400, err.Error())
 		return
 	}
-	path := config.ExpandHome(strings.TrimSpace(input.Path))
-	if !filepath.IsAbs(path) || filepath.Dir(filepath.Clean(path)) == filepath.Clean(path) {
-		consoleError(w, 400, "请选择已有项目的绝对路径，而不是磁盘根目录")
-		return
-	}
-	path, err := filepath.EvalSymlinks(path)
+	c.runtime.consoleMu.Lock()
+	defer c.runtime.consoleMu.Unlock()
+	ws, created, err := c.runtime.registerProject(r.Context(), input.Path, "")
 	if err != nil {
-		consoleError(w, 400, "项目目录不存在或无法访问")
+		consoleError(w, 400, err.Error())
 		return
 	}
-	if filepath.Dir(path) == path {
-		consoleError(w, 400, "项目路径不能指向磁盘根目录")
-		return
-	}
-	info, err := os.Stat(path)
-	if err != nil || !info.IsDir() {
-		consoleError(w, 400, "项目路径必须是已有目录")
-		return
-	}
-	name := filepath.Base(path)
-	c.mutationMu.Lock()
-	defer c.mutationMu.Unlock()
-	cfg, err := config.LoadGlobal(c.runtime.globalCfgPath)
-	if err != nil {
-		consoleError(w, 500, "cannot read workspace configuration")
-		return
-	}
-	// Re-adding an existing physical directory must not rename a custom
-	// workspace or redirect the sessions that are already bound to it.
-	for _, entry := range cfg.Workspaces {
-		registeredPath, resolveErr := filepath.EvalSymlinks(entry.Path)
-		if resolveErr != nil {
-			registeredPath = filepath.Clean(entry.Path)
-		}
-		if registeredPath == path {
-			if err := c.runtime.reg.Register(entry); err != nil {
-				consoleError(w, 409, err.Error())
-				return
-			}
-			mode, err := c.runtime.control.Mode(r.Context(), entry.Name)
-			if err != nil {
-				consoleError(w, 500, "cannot read access settings")
-				return
-			}
-			consoleJSON(w, 200, map[string]any{"name": entry.Name, "path": entry.Path, "description": entry.Description, "access_mode": mode})
-			return
-		}
-	}
-	for _, entry := range cfg.Workspaces {
-		if entry.Name == name && filepath.Clean(entry.Path) != path {
-			consoleError(w, 409, "已存在同名 Workspace；请先使用不同的项目目录名")
-			return
-		}
-	}
-	if existing, ok := c.runtime.reg.Get(name); ok && existing.Path != path {
-		consoleError(w, 409, "workspace name already in use")
-		return
-	}
-	if err = c.runtime.writeAudit(audit.Event{Tool: "console.workspace", Workspace: name, Status: "requested", Detail: map[string]any{"path": path}}); err != nil {
-		consoleError(w, 500, "audit unavailable")
-		return
-	}
-	if err = config.RegisterWorkspace(c.runtime.globalCfgPath, path); err != nil {
-		consoleError(w, 500, "cannot persist workspace")
-		return
-	}
-	if err = c.runtime.reg.Register(config.WorkspaceEntry{Name: name, Path: path}); err != nil {
+	if err := c.runtime.control.RestoreWorkspace(r.Context(), ws.Name); err != nil {
 		consoleError(w, 409, err.Error())
 		return
 	}
-	consoleJSON(w, 201, map[string]any{"name": name, "path": path, "description": "", "access_mode": control.Approval})
+	mode, err := c.runtime.control.Mode(r.Context(), ws.Name)
+	if err != nil {
+		consoleError(w, 500, "cannot read access mode")
+		return
+	}
+	status := 200
+	if created {
+		status = 201
+	}
+	consoleJSON(w, status, map[string]any{"name": ws.Name, "path": ws.Path, "description": ws.Description, "access_mode": mode, "pinned": false, "position": 0, "working_sessions": 0})
 }
 
 func (c *consoleHandler) setAccess(w http.ResponseWriter, r *http.Request) {

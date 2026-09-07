@@ -161,6 +161,9 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, in Creat
 		if err == nil {
 			var result CreateResult
 			if json.Unmarshal([]byte(cached), &result) == nil {
+				if result.Session.WorkspaceName != in.WorkspaceName {
+					return CreateResult{}, fmt.Errorf("%w: client_request_id belongs to a different workspace", ErrConflict)
+				}
 				result.ResumeToken = ""
 				result.ResumeTokenAlreadyIssued = true
 				return result, nil

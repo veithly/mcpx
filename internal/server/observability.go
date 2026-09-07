@@ -161,6 +161,13 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 		arguments := mcpresult.Arguments(req)
 		observedArguments := observationArguments(name, arguments)
 		var embeddedActivityErr error
+		if observationParseErr == nil {
+			release, admissionErr := r.beginConsoleCall(callCtx, observationRequest)
+			if admissionErr != nil {
+				return r.remoteError(observationRequest, observationRequest.RemoteSessionID, observationRequest.Workspace, admissionErr)
+			}
+			defer release()
+		}
 		if !internalOperationStep && observationParseErr == nil {
 			embeddedActivityErr = r.acknowledgeOperatorRequests(callCtx, observationRequest, operatorAcks)
 		}

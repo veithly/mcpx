@@ -1,7 +1,7 @@
 export type AccessMode = 'approval' | 'full_access';
-export interface Workspace { name: string; path: string; description: string; access_mode: AccessMode }
-export interface Session { id: string; workspace: string; label: string; description: string; status: string; last_active_at: number; running_tasks: number }
-export interface Snapshot { workspaces: Workspace[]; sessions: Session[]; next_offset: number; version: string }
+export interface Workspace { name: string; path: string; description: string; access_mode: AccessMode; pinned?: boolean; position?: number; working_sessions?: number }
+export interface Session { id: string; workspace: string; workspace_path?: string; label: string; description: string; status: string; last_active_at: number; running_tasks: number; running_calls?: number; running_operations?: number; is_working?: boolean; pinned?: boolean; position?: number }
+export interface Snapshot { workspaces: Workspace[]; sessions: Session[]; next_offset: number; version: string; sidebar_revision: number; total_sessions: number; removed_session_ids: string[] }
 export interface Auth { authenticated: boolean; csrf?: string; auth_mode?: string; local?: boolean }
 export interface Task { execution_task_id: string; command: string; status: string; runtime_ms: number; exit_code?: number; log_truncated: boolean }
 export interface UserRequest { id: string; body: string; kind: string; status: string; created_at: number; delivered_at?: number; acknowledged_at?: number; remote_session_id?: string; replayed?: boolean }
@@ -28,7 +28,7 @@ export interface Activity {
 export interface HistoryPage { events: Activity[]; last_sequence: number; next_cursor: string }
 export interface DiffLine { kind: 'add' | 'del' | 'hunk' | 'meta' | 'ctx'; text: string }
 export const emptyDetail: Detail = { tasks: [], requests: [], approvals: [], access_mode: 'approval' };
-export const requestStatus: Record<string, string> = { queued: '等待 GPT 调用', delivered: '已附加到工具响应', acknowledged: 'GPT 已回执' };
+export const requestStatus: Record<string, string> = { cancelled: '项目或会话已删除，请求已取消', queued: '等待 GPT 调用', delivered: '已附加到工具响应', acknowledged: 'GPT 已回执' };
 export const statusText: Record<string, string> = { started: '进行中', running: '执行中', exited: '已退出', killed: '已停止', succeeded: '已完成', failed: '失败', waiting_confirmation: '等待审批', active: '会话就绪', closed: '已关闭', interrupted: '已中断', accepted: '已接受', cancelled: '已取消' };
 export const toolTitles: Record<string, string> = {
   execute: '执行命令', edit: '编辑文件', read: '读取文件', session: '会话', workspace: '选择项目',

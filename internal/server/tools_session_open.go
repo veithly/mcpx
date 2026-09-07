@@ -50,6 +50,9 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		if err != nil {
 			return r.remoteError(envReq, remoteID, workspaceName, err)
 		}
+		if err := r.validateSessionWorkspace(ctx, envReq, existing); err != nil {
+			return r.remoteError(envReq, remoteID, workspaceName, err)
+		}
 		session = existing
 		workspaceName = session.WorkspaceName
 	} else {
