@@ -189,7 +189,7 @@ func TestPutDeduplicationExpiresWithTTL(t *testing.T) {
 		t.Fatal(err)
 	}
 	expired := base
-	expired.CreatedAt = time.Now().UTC().Add(-pendingTTL - time.Minute)
+	expired.CreatedAt = time.Now().UTC().Add(-PendingTTL - time.Minute)
 	expired.ID = ""
 	id2, err := s.Put(expired)
 	if err != nil {

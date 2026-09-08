@@ -113,7 +113,7 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 		r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "command_execute", Command: command, Status: "denied", Detail: runtimeExecutionDetail(purpose, scope, commandDigest, runtimeSpec, analysis)})
 		message := "command denied by policy after auditing all command segments"
 		if containsUnsafeShellFeature(command) {
-			message += "；命令包含无法独立审计的 shell 特性。&&、|| 和 ; 会拆分后逐段审计；quoted heredoc（如 <<'PY'）会作为 literal stdin 随所属命令一起审计。管道、普通重定向、单个 &、任意多行 shell、$() 和反引号命令替换仍会拒绝；遇到这些情况请改用可独立审计的简单命令，例如 git fetch && git rev-parse HEAD && git status。"
+			message += "；命令包含无法独立审计的 shell 特性。&&、||、; 和 | 都会拆分后逐段独立审计（每段都要通过策略），/dev/null 与 fd 重定向（如 2>/dev/null、2>&1）允许；带目标的文件重定向、后台 &、任意多行 shell、$() 和反引号命令替换仍会拒绝；遇到这些情况请改用可独立审计的简单命令，例如 git fetch && git rev-parse HEAD && git status。"
 		}
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "denied", message)
 	case security.Confirm:
@@ -156,7 +156,8 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 					"command_digest": commandDigest, "pending_digest": commandDigest,
 					"command_policy":        commandPolicyData(analysis),
 					"confirmation_required": true, "user_confirmed_required": true,
-					"summary": "执行已完成策略预检；请向用户展示命令或临时脚本摘要及用途，确认后将 user_confirmed=true 原样重试。",
+					"pending_expires_at": time.Now().Add(approval.PendingTTL).UnixMilli(),
+					"summary":            "执行已完成策略预检；请向用户展示命令或临时脚本摘要及用途，确认后将 user_confirmed=true 原样重试。这是等待确认，不是失败：不要循环重试或因此放弃任务，先继续其他可推进的工作，稍后带相同参数重试即可；待确认项 30 分钟未处理会自动过期。",
 				}
 				addRuntimeConfirmationData(confirmationData, runtimeSpec)
 				response := envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, remote.WorkspaceName,
@@ -197,7 +198,7 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 			// Struct field order puts confirmation_token first in the JSON
 			// text, so host previews that truncate long tool output still show
 			// the full token to the model.
-			confirmationMessage := "confirmation_token: " + pending.ConfirmationToken + "；请向用户展示命令及用途，获得明确语义确认后，使用相同 command 和该 confirmation_token 重试。该 token 仅绑定本次操作，不承担认证职责。"
+			confirmationMessage := "confirmation_token: " + pending.ConfirmationToken + "；请向用户展示命令及用途，获得明确语义确认后，使用相同 command 和该 confirmation_token 重试。该 token 仅绑定本次操作，不承担认证职责。这是等待确认，不是失败：不要循环重试或因此放弃任务——待确认项会显示在工作台审批队列，30 分钟未处理自动过期；期间先继续其他可推进的工作，稍后用相同参数与 token 重试。"
 			if confirmationToken != "" {
 				confirmationMessage = "你提供的 confirmation_token 未匹配当前待确认项；请使用本响应 data.confirmation_token 中的完整 token 原样重试：" + pending.ConfirmationToken + "（相同 command、remote_session_id 和 scope）。"
 			}
@@ -210,6 +211,7 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 				CommandPolicy:        commandPolicyData(analysis),
 				ConfirmationRequired: true,
 				ConfirmationMessage:  confirmationMessage,
+				PendingExpiresAt:     pending.CreatedAt.Add(approval.PendingTTL).UnixMilli(),
 			}
 			response := envelope.Fail(envelope.StatusNeedConfirmation, envReq.RequestID, remote.WorkspaceName,
 				confirmationData, "USER_CONFIRMATION_REQUIRED", "命令执行等待用户语义确认")
@@ -237,6 +239,7 @@ type commandConfirmationData struct {
 	CommandPolicy        map[string]any `json:"command_policy,omitempty"`
 	ConfirmationRequired bool           `json:"confirmation_required"`
 	ConfirmationMessage  string         `json:"confirmation_message"`
+	PendingExpiresAt     int64          `json:"pending_expires_at,omitempty"`
 }
 
 func (r *Runtime) executeApprovedCommandTask(ctx context.Context, envReq envelope.Request, principal auth.Principal, remote remotesession.Session, command string, yield time.Duration, purpose, scope, commandDigest string, analysis security.CommandAnalysis) (*mcp.CallToolResult, error) {

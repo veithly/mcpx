@@ -64,7 +64,7 @@ type CommandAnalysis struct {
 }
 
 // AnalyzeCommand splits supported compound commands before evaluating policy.
-// &&, ||, and ; are safe control separators because each segment can be judged
+// &&, ||, ;, and | are safe separators because each segment can be judged
 // independently before the original command is passed to the shell. Unsupported
 // shell features fail closed.
 func AnalyzeCommand(rules config.CommandRules, command string) CommandAnalysis {
@@ -116,10 +116,13 @@ func matchSegment(rules config.CommandRules, segment string) Decision {
 }
 
 // HasUnsafeShellOperator reports active shell syntax that cannot be safely
-// preflighted. &&, ||, and ; are supported separators. A quoted heredoc whose
-// terminator closes the command is treated as literal stdin and can be audited
-// as one segment. Pipes, ordinary redirections, background operators, arbitrary
-// multiline shell, and command substitution remain rejected.
+// preflighted. &&, ||, ;, and | are supported separators: every pipeline stage
+// is judged as an independent command. A quoted heredoc whose terminator closes
+// the command is treated as literal stdin and can be audited as one segment.
+// Redirections that cannot change a segment's behavior (/dev/null sinks, fd
+// duplication, stdin from /dev/null) are skipped by the scanner. Background
+// operators, file-writing redirections, unquoted heredocs, arbitrary multiline
+// shell, and command substitution remain rejected.
 // Operators inside quotes or escaped with a backslash are literal content.
 func HasUnsafeShellOperator(command string) bool {
 	_, unsafe := commandSegments(command)
@@ -191,8 +194,15 @@ func commandSegments(command string) ([]commandSegment, bool) {
 				start = index + 1
 				continue
 			}
-			return nil, true
+			if !appendSegment(index, "|") {
+				return nil, true
+			}
+			start = index + 1
 		case '<':
+			if strings.HasPrefix(command[index:], "</dev/null") {
+				index += len("</dev/null") - 1
+				continue
+			}
 			if end, ok := quotedHeredocCommandEnd(command, index); ok {
 				if !appendSegment(end, "") {
 					return nil, true
@@ -200,7 +210,13 @@ func commandSegments(command string) ([]commandSegment, bool) {
 				return segments, false
 			}
 			return nil, true
-		case '>', '`', '\n', '\r':
+		case '>':
+			if skip := benignRedirectSkip(command, index); skip > 0 {
+				index += skip - 1
+				continue
+			}
+			return nil, true
+		case '`', '\n', '\r':
 			return nil, true
 		case '$':
 			if index+1 < len(command) && command[index+1] == '(' {
@@ -227,6 +243,30 @@ func commandSegments(command string) ([]commandSegment, bool) {
 		return nil, true
 	}
 	return segments, false
+}
+
+// benignRedirectSkip reports how many bytes the scanner may step over when
+// command[gt] is '>' opening a redirection that cannot change a segment's
+// audited behavior: sinks to /dev/null (>, >>, N>, N>>) and fd duplication
+// (>&1, >&2, N>&M). It returns 0 for file-writing redirections, which stay
+// rejected. The command text is never rewritten; this only scopes scanning.
+func benignRedirectSkip(command string, gt int) int {
+	i := gt
+	if i+1 < len(command) && command[i+1] == '>' {
+		i++
+	}
+	i++
+	for i < len(command) && (command[i] == ' ' || command[i] == '\t') {
+		i++
+	}
+	rest := command[i:]
+	switch {
+	case strings.HasPrefix(rest, "/dev/null"):
+		return i + len("/dev/null") - gt
+	case len(rest) >= 2 && rest[0] == '&' && (rest[1] == '1' || rest[1] == '2' || rest[1] == '-'):
+		return i + 2 - gt
+	}
+	return 0
 }
 
 // quotedHeredocCommandEnd recognizes the narrow heredoc form that can be

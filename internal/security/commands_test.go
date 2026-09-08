@@ -65,13 +65,14 @@ func TestDefaultCommandPolicyAllowsUnmatchedCommands(t *testing.T) {
 }
 
 func TestMatchCommandRejectsUnsafeOperators(t *testing.T) {
-	// Active pipes, redirections, background operators, and command substitution
+	// File-writing redirections, background operators, and command substitution
 	// cannot be split into independently judged segments and are rejected.
 	rules := config.CommandRules{}
 	for _, command := range []string{
-		"ls | sh",
 		"ls > out.txt",
+		"ls >> out.txt",
 		"cat < in.txt",
+		"cat f > /tmp/evil",
 		"ls $(dangerous)",
 		"echo \"$(dangerous)\"",
 		"ls `id`",
@@ -81,6 +82,53 @@ func TestMatchCommandRejectsUnsafeOperators(t *testing.T) {
 	} {
 		if got := MatchCommand(rules, command); got != Deny {
 			t.Errorf("%q: got %s, want deny", command, got)
+		}
+	}
+}
+
+func TestMatchCommandAuditsPipelineStagesIndependently(t *testing.T) {
+	rules := config.CommandRules{Default: "allow", Confirm: []string{`^docker\b`}, Deny: []string{`^rm\b`}}
+	for _, command := range []string{
+		"ps aux | grep node",
+		"cat access.log | grep error | wc -l",
+		"ps aux | grep node | awk '{print $2}'",
+	} {
+		if got := MatchCommand(rules, command); got != Allow {
+			t.Errorf("benign pipeline %q: got %s, want allow", command, got)
+		}
+	}
+	if got := MatchCommand(rules, "docker ps --format '{{.Names}}' | grep '^supabase'"); got != Confirm {
+		t.Errorf("pipeline with confirm stage: got %s, want confirm", got)
+	}
+	for _, command := range []string{"ps aux | rm -rf x", "rm -rf x | cat"} {
+		if got := MatchCommand(rules, command); got != Deny {
+			t.Errorf("denied pipeline %q: got %s, want deny", command, got)
+		}
+	}
+	for _, command := range []string{"ls |", "| ls", "ls || | wc -l"} {
+		if got := MatchCommand(rules, command); got != Deny {
+			t.Errorf("malformed pipeline %q: got %s, want deny", command, got)
+		}
+	}
+}
+
+func TestMatchCommandAllowsBenignRedirects(t *testing.T) {
+	rules := config.DefaultConfig().Security.Commands
+	for _, command := range []string{
+		"cat /tmp/nolira-render-http.log 2>/dev/null || true",
+		"pgrep -fl 'http.server 8765' 2>&1",
+		"ls -la >/dev/null 2>&1",
+		"cat x >>/dev/null",
+		"grep err app.log > /dev/null",
+		"python3 - </dev/null",
+		"make 2>&1 | tail -20",
+		"git status 2>&1 | head -5",
+	} {
+		if got := MatchCommand(rules, command); got != Allow {
+			t.Errorf("benign redirect %q: got %s, want allow", command, got)
+		}
+		if HasUnsafeShellOperator(command) {
+			t.Errorf("benign redirect %q reported unsafe", command)
 		}
 	}
 }

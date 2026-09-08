@@ -48,7 +48,9 @@ type Store struct {
 	db   *sql.DB
 }
 
-const pendingTTL = 30 * time.Minute
+// PendingTTL is how long a pending approval stays actionable before it
+// expires and the agent should be told to move on.
+const PendingTTL = 30 * time.Minute
 
 // NewStore creates an empty store.
 func NewStore() *Store {
@@ -109,7 +111,7 @@ func (s *Store) PutPending(p Pending) (Pending, error) {
 	}
 	// An incoming approval that is already past its TTL is stale: never fold it
 	// onto a live approval_id.
-	if p.ContentKey != "" && now.Sub(p.CreatedAt) < pendingTTL {
+	if p.ContentKey != "" && now.Sub(p.CreatedAt) < PendingTTL {
 		if existing, ok := s.findPendingLocked(p.RemoteSessionID, p.ContentKey); ok {
 			return existing, nil
 		}
@@ -123,7 +125,7 @@ func (s *Store) PutPending(p Pending) (Pending, error) {
             (id, remote_session_id, principal_id, tool, summary, payload_json, content_key, status, created_at, expires_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
 			p.ID, p.RemoteSessionID, p.PrincipalID, p.Tool, p.Summary, string(payload), p.ContentKey,
-			p.CreatedAt.UnixMilli(), p.CreatedAt.Add(pendingTTL).UnixMilli())
+			p.CreatedAt.UnixMilli(), p.CreatedAt.Add(PendingTTL).UnixMilli())
 		if err != nil {
 			return Pending{}, fmt.Errorf("persist approval: %w", err)
 		}
@@ -187,7 +189,7 @@ func (s *Store) ListRemoteSession(remoteSessionID string) []Pending {
 
 func (s *Store) pruneLocked(now time.Time) {
 	for id, p := range s.byID {
-		if !p.CreatedAt.IsZero() && now.Sub(p.CreatedAt) >= pendingTTL {
+		if !p.CreatedAt.IsZero() && now.Sub(p.CreatedAt) >= PendingTTL {
 			delete(s.byID, id)
 		}
 	}
