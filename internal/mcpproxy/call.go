@@ -111,11 +111,13 @@ func (c *ClientSession) Close() {
 	if c == nil {
 		return
 	}
-	if c.session != nil {
-		_ = c.session.Close()
-	}
+	// Stop the owned process before waiting for the SDK transport to close.
+	// An upstream process ignoring stdin EOF must not hold the result hostage.
 	if c.cancel != nil {
 		c.cancel()
+	}
+	if c.session != nil {
+		_ = c.session.Close()
 	}
 }
 
@@ -265,17 +267,29 @@ func connect(ctx context.Context, srv config.MCPServer, timeout time.Duration, o
 	if srv.Command == "" {
 		return nil, func() {}, fmt.Errorf("empty command")
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-
-	cmd := exec.CommandContext(ctx, srv.Command, srv.Args...)
+	// The connect deadline bounds the handshake, not the entire process life.
+	processCtx, cancel := context.WithCancel(ctx)
+	connectCtx, stopHandshake := context.WithTimeout(processCtx, timeout)
+	defer stopHandshake()
+	// SDK Connect may close a failed transport before returning. Cancel its
+	// process at the deadline rather than waiting for that close to finish.
+	stopProcessOnHandshakeFailure := context.AfterFunc(connectCtx, cancel)
+	defer stopProcessOnHandshakeFailure()
+	cmd := exec.CommandContext(processCtx, srv.Command, srv.Args...)
+	cmd.WaitDelay = 2 * time.Second
 	// Windows 下隐藏上游 MCP 命令创建的控制台窗口；其他系统为空操作。
 	winproc.ConfigureNoWindow(cmd)
 	cmd.Env = append(os.Environ(), ExpandEnv(srv.Env)...)
 	client := mcp.NewClient(&mcp.Implementation{Name: "mcpx", Version: buildversion.Current}, options)
-	session, err := client.Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
+	session, err := client.Connect(connectCtx, &mcp.CommandTransport{Command: cmd}, nil)
 	if err != nil {
 		cancel()
 		return nil, func() {}, fmt.Errorf("connect upstream mcp: %w", err)
+	}
+	if !stopProcessOnHandshakeFailure() {
+		cancel()
+		_ = session.Close()
+		return nil, func() {}, connectCtx.Err()
 	}
 	return session, cancel, nil
 }

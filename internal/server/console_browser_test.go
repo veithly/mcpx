@@ -42,6 +42,12 @@ func TestConsoleBrowserQA(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer task.Kill()
+	parallel := create("alpha", "并行测试与构建")
+	second, err := rt.tasks.StartRemote(ctx, parallel, "alpha", ws.Path, "sleep 480")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Kill()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

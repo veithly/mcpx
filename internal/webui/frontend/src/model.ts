@@ -1,12 +1,12 @@
 export type AccessMode = 'approval' | 'full_access';
-export interface Workspace { name: string; path: string; description: string; access_mode: AccessMode; pinned?: boolean; position?: number; working_sessions?: number }
-export interface Session { id: string; workspace: string; workspace_path?: string; label: string; description: string; status: string; last_active_at: number; running_tasks: number; running_calls?: number; running_operations?: number; is_working?: boolean; pinned?: boolean; position?: number }
-export interface Snapshot { workspaces: Workspace[]; sessions: Session[]; next_offset: number; version: string; sidebar_revision: number; total_sessions: number; removed_session_ids: string[] }
+export interface Workspace { name: string; path: string; description: string; access_mode: AccessMode; pinned?: boolean; position?: number; working_sessions?: number; session_count?: number; active_sessions?: number; last_command_at?: number; is_active?: boolean; preferred_session_id?: string }
+export interface Session { id: string; workspace: string; workspace_path?: string; label: string; description: string; status: string; last_active_at: number; running_tasks: number; running_calls?: number; running_operations?: number; last_command_at?: number; recent_command?: boolean; is_working?: boolean; pinned?: boolean; position?: number }
+export interface Snapshot { workspaces: Workspace[]; sessions: Session[]; next_offset: number; version: string; sidebar_revision: number; total_sessions: number; removed_session_ids: string[]; server_time?: number }
 export interface Auth { authenticated: boolean; csrf?: string; auth_mode?: string; local?: boolean }
 export interface Task { execution_task_id: string; command: string; status: string; runtime_ms: number; exit_code?: number; log_truncated: boolean }
 export interface UserRequest { id: string; body: string; kind: string; status: string; created_at: number; delivered_at?: number; acknowledged_at?: number; remote_session_id?: string; replayed?: boolean }
 export interface Approval { id: string; tool: string; summary: string; command: string; scope: string; decision: string; can_decide: boolean }
-export interface Detail { tasks: Task[]; requests: UserRequest[]; approvals: Approval[]; access_mode: AccessMode }
+export interface Detail { tasks: Task[]; requests: UserRequest[]; approvals: Approval[]; access_mode: AccessMode; session_info?: Session }
 export interface ActivityOutput { stream: string; text: string }
 export interface Activity {
   sequence: number; type: string; workspace: string;

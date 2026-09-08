@@ -350,7 +350,7 @@ func TestOutputSchemaAndRegistry(t *testing.T) {
 	if err := json.Unmarshal(rawOutputSchema, &schema); err != nil {
 		t.Fatal(err)
 	}
-	if schema["$id"] != "mcpx.structured_content.v2.0" {
+	if schema["$id"] != "urn:mcpx:structured-content:v2.0" {
 		t.Fatalf("schema id = %v", schema["$id"])
 	}
 	required, _ := schema["required"].([]any)

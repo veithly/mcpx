@@ -78,8 +78,12 @@ func (r *Runtime) executeOperationStep(ctx context.Context, input operation.Exec
 	}
 	arguments := cloneArguments(input.Arguments)
 	arguments["remote_session_id"] = input.RemoteSessionID
-	arguments["purpose"] = input.Purpose
-	arguments["execution_mode"] = "sync"
+	if r.toolAcceptsArgument(input.Tool, "purpose") {
+		arguments["purpose"] = input.Purpose
+	}
+	// The child context prevents recursive async submission. Read-only tools
+	// must not receive an invented execution_mode field.
+	delete(arguments, "execution_mode")
 	request := mcpresult.Request(arguments)
 	childCtx := r.operationChildContext(ctx, input)
 	result, callErr := handler(childCtx, request)

@@ -278,6 +278,10 @@ func (r *Runtime) mcpToolCallWithObservedSession(ctx context.Context, req *mcp.C
 	openFailure := func(openErr error) (*mcp.CallToolResult, error) {
 		code, message := "MCP_SERVER_UNAVAILABLE", openErr.Error()
 		switch {
+		case errors.Is(openErr, context.DeadlineExceeded):
+			code = "MCP_CONNECT_TIMEOUT"
+		case errors.Is(openErr, context.Canceled):
+			code = "MCP_CALL_CANCELLED"
 		case errors.Is(openErr, errMCPDisabled):
 			message = "upstream MCP is disabled"
 		case errors.Is(openErr, errMCPServerNotFound):
@@ -372,10 +376,17 @@ func (r *Runtime) toolMCPCallOnSession(ctx context.Context, req *mcp.CallToolReq
 	args, _ := envReq.Payload["arguments"].(map[string]any)
 	res, err := client.CallTool(ctx, toolName, args, mcpCallRequestMeta(envReq, remote.ID, remote.WorkspaceName))
 	if err != nil {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "MCP_CALL_FAILED", err.Error())
+		code := "MCP_CALL_FAILED"
+		if errors.Is(err, context.DeadlineExceeded) {
+			code = "MCP_CALL_TIMEOUT"
+		}
+		if errors.Is(err, context.Canceled) {
+			code = "MCP_CALL_CANCELLED"
+		}
+		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, code, fmt.Sprintf("upstream %s/%s: %v", serverName, toolName, err))
 	}
 	if res == nil {
-		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "MCP_CALL_FAILED", "upstream MCP returned no CallToolResult")
+		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "MCP_EMPTY_RESULT", "upstream MCP returned no CallToolResult")
 	}
 
 	// A CallToolResult proves tools/call reached the upstream tool, regardless
@@ -389,7 +400,10 @@ func (r *Runtime) toolMCPCallOnSession(ctx context.Context, req *mcp.CallToolReq
 	}
 
 	augmentMCPCallResult(res, envReq, remote.ID, remote.WorkspaceName, serverName, toolName)
-	b, _ := json.Marshal(res)
+	b, encodeErr := marshalToolResult(res)
+	if encodeErr != nil {
+		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "RESULT_ENCODING_FAILED", "upstream result could not be serialized; inspect its effects before retrying")
+	}
 	maxResultBytes := config.MaxResultBytes(eff.Limits)
 	if maxResultBytes > 0 && len(b) > maxResultBytes {
 		response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, nil, "MCP_RESULT_TOO_LARGE", "upstream MCP result exceeds the configured response budget")
@@ -397,8 +411,12 @@ func (r *Runtime) toolMCPCallOnSession(ctx context.Context, req *mcp.CallToolReq
 		if response.Error != nil {
 			response.Error.Details["result_bytes"] = len(b)
 			response.Error.Details["max_result_bytes"] = maxResultBytes
-			addRecoveryAction(&response, "mcp_tool", "使用上游工具的分页或 limit 参数缩小结果后重试", map[string]any{
-				"action": "call", "remote_session_id": remote.ID, "server": serverName, "tool": toolName,
+			response.Error.Details["origin"] = "upstream"
+			response.Error.Details["execution_state"] = "upstream_returned"
+			response.Error.Details["safe_to_retry_unchanged"] = false
+			response.Error.Details["retry_hint"] = "The upstream tool already returned; effects may have occurred. Inspect the affected state first. Only repeat a read-only/idempotent query with smaller pagination after verifying it is safe; do not replay a mutation merely to reduce its output."
+			addRecoveryAction(&response, "observe", "inspect this completed upstream invocation before considering a safe alternative", map[string]any{
+				"view": "history", "remote_session_id": remote.ID, "request_ids": []string{envReq.RequestID},
 			})
 		}
 		return r.resultJSON(response)

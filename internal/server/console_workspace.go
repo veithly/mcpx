@@ -178,7 +178,26 @@ func (c *consoleHandler) detail(w http.ResponseWriter, r *http.Request) {
 		consoleError(w, 500, "cannot read access mode")
 		return
 	}
-	consoleJSON(w, 200, map[string]any{"tasks": tasks, "requests": requests, "approvals": approvals, "access_mode": mode})
+	response := map[string]any{"tasks": tasks, "requests": requests, "approvals": approvals, "access_mode": mode}
+	if session != "" {
+		var current consoleSession
+		err := c.runtime.state.DB().QueryRowContext(r.Context(), `SELECT rs.id,rs.workspace_name,rs.workspace_path,rs.label,rs.description,rs.status,rs.last_active_at,
+ (SELECT COUNT(*) FROM terminal_tasks t WHERE t.remote_session_id=rs.id AND t.status='running'),
+ (SELECT COUNT(*) FROM operations o WHERE o.remote_session_id=rs.id AND o.state IN ('queued','running')),
+ COALESCE((SELECT MAX(MAX(t.started_at,COALESCE(t.finished_at,0))) FROM terminal_tasks t WHERE t.remote_session_id=rs.id),0)
+ FROM remote_sessions rs WHERE rs.id=? AND rs.workspace_name=?`, session, ws).Scan(&current.ID, &current.Workspace, &current.Path, &current.Label, &current.Description, &current.Status, &current.LastActive, &current.RunningTasks, &current.RunningOperations, &current.LastCommandAt)
+		if err != nil {
+			consoleError(w, 404, "session no longer available")
+			return
+		}
+		c.runtime.consoleMu.Lock()
+		current.RunningCalls = c.runtime.consoleCalls[session].Count
+		c.runtime.consoleMu.Unlock()
+		current.IsWorking = current.RunningTasks+current.RunningCalls+current.RunningOperations > 0
+		current.RecentCommand = recentCommand(current, time.Now().UnixMilli())
+		response["session_info"] = current
+	}
+	consoleJSON(w, 200, response)
 }
 
 func (c *consoleHandler) notice(ctx context.Context, ws, session, kind, summary string) {

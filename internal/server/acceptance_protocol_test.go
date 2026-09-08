@@ -241,10 +241,10 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			t.Fatalf("%s must expose an OutputSchema: %+v", name, listedTool["outputSchema"])
 		}
 		if name == "mcp_tool" {
-			if outputSchema["$id"] != "mcpx.mcp_tool_result.v1" || outputSchema["type"] != nil {
+			if outputSchema["$id"] != "urn:mcpx:mcp-tool-result:v1" || outputSchema["type"] != nil {
 				t.Fatalf("mcp_tool must allow transparent upstream structuredContent of any JSON shape: %+v", outputSchema)
 			}
-		} else if outputSchema["$id"] != "mcpx.structured_content.v2.0" {
+		} else if outputSchema["$id"] != "urn:mcpx:structured-content:v2.0" {
 			t.Fatalf("%s must expose the ARC structuredContent OutputSchema: %+v", name, listedTool["outputSchema"])
 		}
 		inputSchema, err := json.Marshal(tool.InputSchema)
@@ -747,9 +747,9 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	if match0["sha256"] == nil || match0["sha256"] == "" {
 		t.Fatalf("search missing sha256: %+v", match0)
 	}
-	scopedQuery := call("context_query", map[string]any{
-		"action": "query", "remote_session_id": remoteID,
-		"query": "检查 Alpha 实现代码", "mode": "smart", "parallel": true, "max_results": 10,
+	scopedQuery := call("read", map[string]any{
+		"view": "context", "remote_session_id": remoteID,
+		"query": "检查 Alpha 实现代码", "search_mode": "smart", "parallel": true, "max_results": 10,
 		"paths": []any{"."}, "include_glob": "**/*.go",
 	})
 	scopedData, _ := scopedQuery["data"].(map[string]any)
@@ -889,8 +889,8 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		if statusOK(removed) {
 			t.Fatalf("observe must reject removed view %q: %+v", removedView, removed)
 		}
-		if body, _ := removed["error"].(map[string]any); strings.ToUpper(fmt.Sprint(body["code"])) != "INVALID_ACTION" {
-			t.Fatalf("observe removed view %q must return INVALID_ACTION: %+v", removedView, removed)
+		if body, _ := removed["error"].(map[string]any); strings.ToUpper(fmt.Sprint(body["code"])) != "INVALID_ARGUMENTS" {
+			t.Fatalf("observe removed view %q must return INVALID_ARGUMENTS before execution: %+v", removedView, removed)
 		}
 	}
 }

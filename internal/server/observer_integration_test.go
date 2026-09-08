@@ -85,8 +85,9 @@ func TestObservationRecordsToolLifecycleAndRedacts(t *testing.T) {
 	errorWrapper := rt.instrumentTool("observer_error_test", func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return nil, errors.New("observer operation failed")
 	})
-	if _, err := errorWrapper(context.Background(), errorRequest); err == nil {
-		t.Fatal("expected handler error")
+	failed, err := errorWrapper(context.Background(), errorRequest)
+	if err != nil || failed == nil || !failed.IsError || !strings.Contains(mcpresult.FirstText(failed), "observer operation failed") {
+		t.Fatalf("handler error must be an informative tool result: %+v %v", failed, err)
 	}
 	var errorOutput string
 	deadline = time.Now().Add(2 * time.Second)

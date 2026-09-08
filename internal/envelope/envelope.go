@@ -273,6 +273,18 @@ func usesBooleanConfirmation(data any) bool {
 }
 
 func classifyError(status Status, code string) (category string, retryable bool, retryHint string) {
+	switch code {
+	case "TOOL_TIMEOUT":
+		return "timeout", false, "The response deadline elapsed; execution may be incomplete or already have side effects. Inspect this call's history or Task before retrying, and use a shorter call or an asynchronous operation for long work."
+	case "TOOL_CANCELLED", "MCP_CALL_CANCELLED":
+		return "cancelled", false, "The call was cancelled. Inspect any partial effects before deciding whether another action is needed; do not automatically restart cancelled work."
+	case "MCP_CALL_FAILED", "MCP_CALL_TIMEOUT", "MCP_CONNECT_TIMEOUT", "MCP_SERVER_UNAVAILABLE", "MCP_EMPTY_RESULT":
+		return "upstream", false, "Inspect the selected upstream MCP server and the reported cause, not the whole MCPX installation. A call may have reached the upstream tool: verify its state before replaying effects; correct arguments or choose another supported tool."
+	case "RESULT_ENCODING_FAILED", "TOOL_EMPTY_RESULT", "EXECUTION_RUNTIME_ERROR", "TOOL_EXECUTION_FAILED":
+		return "internal", false, "This invocation could not produce a valid result. Inspect its recorded state before retrying or choosing another operation; a single failed call does not establish a MCPX outage."
+	case "TOOL_BUSY":
+		return "capacity", true, "The call was not started. Wait for in-flight work to finish and retry with bounded backoff, without parallel duplicates."
+	}
 	if code == "CONFIRMATION_REQUIRED" {
 		return "confirmation", true, "Ask the user to confirm the frozen manifest in the web conversation, then call move_out(action=submit) with the confirmation_uuid returned by move_out(action=prepare)."
 	}
@@ -324,7 +336,7 @@ func classifyError(status Status, code string) (category string, retryable bool,
 		return "validation", false, "Correct the request arguments and retry."
 	}
 	if strings.Contains(code, "START") || strings.Contains(code, "EXEC") || strings.Contains(code, "RUNTIME") || strings.Contains(code, "TIMEOUT") || strings.Contains(code, "INTERRUPTED") {
-		return "runtime", true, "Retry when the runtime is available or inspect the Task logs."
+		return "runtime", false, "Inspect the specific error and Task logs, including any partial effects, before retrying or choosing a different command. This error alone does not establish that MCPX is unavailable."
 	}
 	return "internal", false, "Inspect the server log and retry with a new request id if appropriate."
 }

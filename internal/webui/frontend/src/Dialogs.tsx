@@ -1,57 +1,53 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ArrowUp, ChevronRight, Folder, FolderOpen, FolderPlus, Home, ShieldCheck, ShieldOff, X } from 'lucide-react';
+import { FolderOpen, FolderPlus, ShieldCheck, ShieldOff, X } from 'lucide-react';
 import { api, message } from './api';
 import type { AccessMode, Workspace } from './model';
 
-interface FsEntry { name: string; path: string }
-interface FsPage { path: string; parent: string; home: string; segments: { label: string; path: string }[]; entries: FsEntry[] }
 
 export function Modal({ title, children, close }: { title: string; children: ReactNode; close: () => void }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => { const dialog = ref.current; dialog?.showModal(); return () => dialog?.close(); }, []);
-  return <dialog ref={ref} className="modal" onCancel={close} aria-label={title}>
+  return <dialog ref={ref} className="modal" onCancel={event => { event.preventDefault(); close(); }} aria-label={title}>
     <header><h2>{title}</h2><button className="icon-button" aria-label="关闭弹窗" onClick={close}><X size={19}/></button></header>{children}
   </dialog>;
 }
 export function AddWorkspace({ close, added }: { close: () => void; added: (workspace: Workspace) => void }) {
-  const [page, setPage] = useState<FsPage>();
+  const [path, setPath] = useState('');
+  const choosing = useRef<AbortController | undefined>(undefined);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; choosing.current?.abort(); }; }, []);
   const [browsing, setBrowsing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const load = async (target: string) => {
+  const selectFolder = async () => {
+    if (choosing.current) return;
+    const controller = new AbortController(); choosing.current = controller;
     setBrowsing(true); setError('');
-    try { setPage(await api<FsPage>('fs?path=' + encodeURIComponent(target))); }
-    catch (cause) { setError(message(cause)); } finally { setBrowsing(false); }
+    try {
+      const result = await api<{path?:string;cancelled:boolean}>('native/folder', {method:'POST', body:JSON.stringify({confirm:true}), signal:controller.signal});
+      if (mounted.current && !result.cancelled && result.path) setPath(result.path);
+    } catch (cause) { if (mounted.current && !controller.signal.aborted) setError(message(cause)); }
+    finally { choosing.current = undefined; if (mounted.current) setBrowsing(false); }
   };
-  useEffect(() => { void load(''); }, []);
   const add = async () => {
-    if (!page) return;
+    if (!path.trim()) return;
     setBusy(true); setError('');
-    try { const workspace = await api<Workspace>('workspaces', { method: 'POST', body: JSON.stringify({ path: page.path }) }); added(workspace); close(); }
+    try { const workspace = await api<Workspace>('workspaces', { method: 'POST', body: JSON.stringify({ path: path.trim() }) }); added(workspace); close(); }
     catch (cause) { setError(message(cause)); } finally { setBusy(false); }
   };
-  const name = page ? page.path.split(/[\\/]/).filter(Boolean).pop() : '';
+  const name = path.split(/[\\/]/).filter(Boolean).pop() || '';
   return <Modal title="添加项目到 Workspace" close={close}>
     <div className="modal-intro"><FolderPlus size={23}/><p>从运行 MCPX 的机器上选择一个已有项目文件夹。不会复制、移动或上传你的项目文件。</p></div>
-    <div className="fs-crumb" aria-label="目录路径">
-      <button className="icon-button" title="主目录" aria-label="回到主目录" disabled={!page?.home || browsing} onClick={() => void load(page?.home || '')}><Home size={15}/></button>
-      <button className="icon-button" title="上一级" aria-label="上一级目录" disabled={!page?.parent || browsing} onClick={() => void load(page?.parent || '')}><ArrowUp size={15}/></button>
-      <div className="fs-crumb-path">{page?.segments.map(segment => <button key={segment.path} disabled={browsing} onClick={() => void load(segment.path)}>{segment.label}<ChevronRight size={11} className="fs-crumb-sep" aria-hidden="true"/></button>)}</div>
+    <div className="native-folder-choice">
+      <button className="secondary" disabled={busy || browsing} onClick={() => void selectFolder()}><FolderOpen size={18}/>{browsing ? '请在系统窗口中选择…' : path ? '重新选择文件夹' : '选择项目文件夹…'}</button>
+      <p className="field-help">打开运行 MCPX 的电脑上的系统文件夹选择器，不上传文件，也不扫描其他目录。</p>
+      {path && <code className="remove-path">{path}</code>}
     </div>
-    <div className="fs-browser" role="listbox" aria-label="选择文件夹">
-      {browsing && !page && <p className="fs-note">正在读取目录…</p>}
-      {page?.entries.map(entry => <button className="fs-row" key={entry.path} disabled={browsing} onClick={() => void load(entry.path)} role="option" aria-label={'打开文件夹 ' + entry.name}><FolderOpen size={15}/><span>{entry.name}</span></button>)}
-      {page && !page.entries.length && <p className="fs-note">这个目录下没有子文件夹了，可以直接添加当前目录。</p>}
-    </div>
-    <div className="fs-selected">
-      <Folder size={16}/>
-      <div className="fs-selected-path"><small>已选文件夹</small><code>{page?.path || '…'}</code></div>
-      <button className="primary" disabled={!page || busy || browsing} onClick={() => void add()}>{busy ? '正在添加…' : name ? `添加为 Workspace（${name}）` : '添加 Workspace'}</button>
-    </div>
+    <details className="manual-folder"><summary>无桌面环境？输入服务器上的绝对路径</summary><label>项目目录<input aria-label="项目绝对路径" value={path} disabled={busy || browsing} onChange={event => setPath(event.target.value)} placeholder="/absolute/path/to/project"/></label></details>
+    <footer className="modal-actions"><button className="secondary" disabled={busy} onClick={close}>取消</button><button className="primary" disabled={!path.trim() || busy || browsing} onClick={() => void add()}>{busy ? '正在添加…' : name ? `添加项目 ${name}` : '添加项目'}</button></footer>
     <p className="field-help">项目文件夹的名字将成为 Workspace 名称；重复添加同一目录会保留原有 Workspace。</p>
     {error && <p className="form-error" role="alert">{error}</p>}
-    <footer className="modal-actions"><button className="secondary" type="button" onClick={close}>取消</button></footer>
   </Modal>;
 }
 export function AccessSettings({ workspace, mode, close, saved }: { workspace: string; mode: AccessMode; close: () => void; saved: () => void }) {
@@ -62,7 +58,7 @@ export function AccessSettings({ workspace, mode, close, saved }: { workspace: s
     catch (cause) { setError(message(cause)); } finally { setBusy(false); }
   };
   return <Modal title="Workspace 访问权限" close={close}><form onSubmit={event => { event.preventDefault(); void save(); }}>
-    <p className="modal-description">仅应用于 <strong>{workspace}</strong>，保存在 Runtime 中。其他项目不会受到影响。</p>
+    <p className="modal-description">仅应用于 <strong>{workspace}</strong>，保存在 Runtime 中，同项目的所有会话复用，不会因切换会话重复请求。其他项目不会受到影响。</p>
     <fieldset className="mode-options"><legend className="sr-only">执行审批方式</legend>
       <label className={selected === 'approval' ? 'selected' : ''}><input type="radio" name="mode" value="approval" checked={selected === 'approval'} onChange={() => setSelected('approval')}/><ShieldCheck size={22}/><span><strong>审批模式 <em>推荐</em></strong><small>需要确认的操作保持暂停。由你查看并批准，也保留现有 GPT 确认流程。</small></span></label>
       <label className={selected === 'full_access' ? 'selected' : ''}><input type="radio" name="mode" value="full_access" checked={selected === 'full_access'} onChange={() => setSelected('full_access')}/><ShieldOff size={22}/><span><strong>完全访问</strong><small>允许范围内的命令静默执行，不再逐次请求 MCPX 审批。适合你信任的项目。</small></span></label>

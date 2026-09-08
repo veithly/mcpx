@@ -25,7 +25,7 @@ func (r *Runtime) addTool(s *mcp.Server, tool mcp.Tool, handler mcp.ToolHandler)
 	// envelope. The shared ARC contract stays identical across tools while
 	// hard limits are attached from the same source used by runtime capabilities.
 	tool.OutputSchema = outputSchemaForTool(tool.Name)
-	instrumented := r.instrumentTool(tool.Name, handler)
+	instrumented := r.boundedTool(tool.Name, r.instrumentTool(tool.Name, handler, toolValidator(tool)), toolResponseTimeout)
 	if r.toolHandlers == nil {
 		r.toolHandlers = map[string]mcp.ToolHandler{}
 	}
@@ -60,7 +60,7 @@ func outputSchemaForTool(toolName string) json.RawMessage {
 		// transparent proxy and therefore may return any JSON value allowed by
 		// the selected upstream tool's structuredContent contract.
 		schema := map[string]any{
-			"$id":         "mcpx.mcp_tool_result.v1",
+			"$id":         "urn:mcpx:mcp-tool-result:v1",
 			"description": "mcp_tool list/describe return MCPX metadata; call forwards upstream structuredContent unchanged and may return any JSON value",
 		}
 		if hasLimits {
@@ -127,18 +127,26 @@ func signalProgressPulse(ctx context.Context) {
 	}
 }
 
-func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolHandler {
+func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validators ...toolInputValidator) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (result *mcp.CallToolResult, err error) {
+		ctx, _ = ensureRuntimeContext(ctx, mcpresult.Header(req), time.Now())
+		resultCtx := ctx
 		// Keep the entire instrumentation boundary defensive. Handler calls use
 		// callToolSafely below so normal panics retain ARC wrapping; this outer
 		// guard also covers malformed observation metadata or renderer changes.
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				logging.With("component", "mcp_tool").Error("instrumentation panic recovered", "tool", name, "panic", fmt.Sprint(recovered), "stack", string(debug.Stack()))
-				result = mcpresult.NewError("EXECUTION_RUNTIME_ERROR: tool execution failed")
-				err = nil
+				result = toolFailure(resultCtx, name, req, "EXECUTION_RUNTIME_ERROR", "An internal error was contained while processing this tool call. Check its recorded outcome before retrying.", nil)
 			}
+			result = ensureToolResponse(resultCtx, name, req, result, err)
+			err = nil // SDK must receive the tool result, not discard it for a Go error.
 		}()
+		for _, validate := range validators {
+			if validationErr := validate(req); validationErr != nil {
+				return toolFailure(ctx, name, req, "INVALID_ARGUMENTS", validationErr.Error(), nil), nil
+			}
+		}
 		operatorAcks := mcpresult.Arguments(req)["acknowledge_requests"]
 		req = withoutOperatorAcks(req)
 		received := time.Now()
@@ -149,6 +157,7 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 			runtime = runtimeContextWithClient(runtime, clientName, clientVersion)
 		}
 		callCtx = withRuntimeContext(callCtx, runtime)
+		resultCtx = callCtx
 		callCtx = withToolInvocationName(callCtx, name)
 		callCtx, progressPulse := withProgressPulse(callCtx)
 		stopProgressHeartbeat := startToolProgressHeartbeat(callCtx, req, name, received, progressPulse)
@@ -200,12 +209,10 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 		if err != nil || result == nil || result.IsError {
 			status = "error"
 		}
-		if err != nil {
-			if result == nil {
-				result = mcpresult.NewError(err.Error())
-			} else {
-				result.IsError = true
-			}
+		result = normalizeToolOutcome(callCtx, name, req, result, err)
+		err = nil
+		if result.IsError {
+			status = "error"
 		}
 		// Wrap first so host-visible content is the human summary; observation
 		// then snapshots that text only (never full structuredContent dump).
@@ -229,8 +236,13 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler) mcp.ToolH
 		if !internalOperationStep && observationParseErr == nil {
 			r.appendOperatorContext(callCtx, observationRequest, name, req, result)
 		}
+		result = ensureToolResponse(callCtx, name, req, result, nil)
 		if !internalOperationStep && observationParseErr == nil && r.observation != nil {
-			_ = r.observation.RecordToolCompleted(callCtx, name, observationRequest, observedArguments, result, err, timing)
+			// A cancelled HTTP response must not erase the worker's eventual
+			// outcome. This context is for bounded bookkeeping, never execution.
+			recordCtx, finishRecord := context.WithTimeout(context.WithoutCancel(callCtx), 2*time.Second)
+			_ = r.observation.RecordToolCompleted(recordCtx, name, observationRequest, observedArguments, result, err, timing)
+			finishRecord()
 		}
 		if !internalOperationStep {
 			logToolCall(name, runtime, status, timing)

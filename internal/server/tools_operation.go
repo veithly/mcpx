@@ -257,7 +257,9 @@ func (r *Runtime) validateOperationToolArguments(toolName string, arguments map[
 	}
 	merged := cloneArguments(arguments)
 	merged["remote_session_id"] = sessionID
-	merged["purpose"] = purpose
+	if r.toolAcceptsArgument(toolName, "purpose") {
+		merged["purpose"] = purpose
+	}
 	return validateOperationSchemaValue(merged, schema, "arguments")
 }
 

@@ -87,8 +87,9 @@ func TestAsyncToolReturnsOperationAndWaitsForResult(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	session := operationTestSession(t, rt, "demo")
 
-	accepted := callOperationTool(t, rt, "read", map[string]any{
-		"remote_session_id": session.ID, "purpose": "异步读取工作区", "execution_mode": "async", "view": "list", "limit": 5,
+	accepted := callOperationTool(t, rt, "operation_batch", map[string]any{
+		"remote_session_id": session.ID, "purpose": "异步读取工作区",
+		"operations": []any{map[string]any{"id": "main", "tool": "read", "arguments": map[string]any{"view": "list", "limit": 5}}},
 	})
 	if accepted["status"] != "accepted" {
 		t.Fatalf("accepted response=%+v", accepted)
@@ -441,11 +442,11 @@ func TestOperationManageBatchValidationAndPermissions(t *testing.T) {
 		args map[string]any
 		want string
 	}{
-		{"missing targets", map[string]any{"remote_session_id": session.ID, "action": "status"}, "operation_id or operation_ids"},
+		{"missing targets", map[string]any{"remote_session_id": session.ID, "action": "status"}, "operation_id"},
 		{"both target forms", map[string]any{"remote_session_id": session.ID, "action": "status", "operation_id": valid.ID, "operation_ids": []any{valid.ID}}, "mutually exclusive"},
 		{"empty operation_ids", map[string]any{"remote_session_id": session.ID, "action": "status", "operation_ids": []any{}}, "operation_ids"},
 		{"duplicate operation_ids", map[string]any{"remote_session_id": session.ID, "action": "status", "operation_ids": []any{valid.ID, valid.ID}}, "duplicate"},
-		{"batch wait", map[string]any{"remote_session_id": session.ID, "action": "wait", "operation_ids": []any{valid.ID}}, "status or action=result"},
+		{"batch wait", map[string]any{"remote_session_id": session.ID, "action": "wait", "operation_ids": []any{valid.ID}}, "action"},
 		{"batch step", map[string]any{"remote_session_id": session.ID, "action": "result", "operation_ids": []any{valid.ID}, "step_id": "valid"}, "step_id"},
 		{"batch cursor", map[string]any{"remote_session_id": session.ID, "action": "result", "operation_ids": []any{valid.ID}, "cursor": "10"}, "cursor"},
 	}

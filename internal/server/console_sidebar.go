@@ -47,12 +47,13 @@ func (c *consoleHandler) sidebar(w http.ResponseWriter, r *http.Request) {
 	if pref, ok := prefs[sidebarKey(input.Kind, input.ID)]; ok {
 		current = pref
 	}
-	found, working := false, false
+	found, working, commandActive := false, false, false
 	if input.Kind == "workspace" {
 		for _, ws := range workspaces {
 			if ws.Name == input.ID && ws.Name == input.Workspace {
 				found = true
 				working = ws.Working > 0
+				commandActive = ws.IsActive
 			}
 		}
 	} else {
@@ -85,7 +86,7 @@ func (c *consoleHandler) sidebar(w http.ResponseWriter, r *http.Request) {
 		group := []control.SidebarItem{}
 		if input.Kind == "workspace" {
 			for _, ws := range workspaces {
-				if ws.Pinned == current.Pinned {
+				if ws.Pinned == current.Pinned && ws.IsActive == commandActive {
 					group = append(group, control.SidebarItem{Kind: "workspace", ID: ws.Name, Workspace: ws.Name, Pinned: ws.Pinned})
 				}
 			}
@@ -108,7 +109,7 @@ func (c *consoleHandler) sidebar(w http.ResponseWriter, r *http.Request) {
 			ordered = append(ordered, item)
 		}
 		if target < 0 {
-			consoleError(w, 409, "只能在同一项目、相同运行与置顶分组内排序；拖动不会更改项目归属")
+			consoleError(w, 409, "只能在相同活跃与置顶分组内排序；会话还必须属于同一项目，拖动不会更改项目归属")
 			return
 		}
 		if input.Placement == "after" {

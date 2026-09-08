@@ -834,7 +834,7 @@ func buildOutputSchema() json.RawMessage {
 		// This schema is repeated once per tool in tools/list. Keep the shared
 		// result contract explicit while leaving tool-specific data open; the
 		// result type and the actual data fields are the stable discriminator.
-		"$id": "mcpx.structured_content.v" + Version, "type": "object",
+		"$id": "urn:mcpx:structured-content:v" + Version, "type": "object",
 		"required":             []string{"status", "type", "context", "timing", "data"},
 		"additionalProperties": false,
 		"properties": map[string]any{

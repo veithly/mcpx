@@ -1,93 +1,85 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"mcpx/internal/nativeui"
 )
 
-func TestConsoleBrowseListsDirectoriesOnly(t *testing.T) {
-	rt := newWorkspaceRuntime(t, "alpha")
-	root := filepath.Join(t.TempDir(), "picker")
-	if err := os.MkdirAll(filepath.Join(root, "project-a"), 0o755); err != nil {
+func TestConsoleNativeFolderSelectionReturnsExactPathAndCancellation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "项目 with spaces")
+	if err := os.Mkdir(path, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, ".hidden-dir"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("secret"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	c := consoleLogin(t, rt)
-	response := c.request(t, "GET", "fs?path="+root, nil)
-	if response.Code != 200 {
-		t.Fatalf("browse=%d %s", response.Code, response.Body.String())
-	}
-	var page struct {
-		Path     string
-		Parent   string
-		Segments []map[string]string
-		Entries  []struct{ Name, Path string }
-		Home     string
-	}
-	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
-		t.Fatal(err)
-	}
-	if page.Path != root {
-		t.Fatalf("path=%q", page.Path)
-	}
-	if page.Parent == "" {
-		t.Fatal("parent missing")
-	}
-	var names []string
-	for _, entry := range page.Entries {
-		names = append(names, entry.Name)
-		if want := filepath.Join(root, entry.Name); entry.Path != want {
-			t.Fatalf("entry path=%q want %q", entry.Path, want)
-		}
-	}
-	// Visible directories first, hidden ones after, files never listed.
-	if len(names) != 2 || names[0] != "project-a" || names[1] != ".hidden-dir" {
-		t.Fatalf("entries=%v", names)
-	}
-	if len(page.Segments) == 0 || page.Segments[len(page.Segments)-1]["path"] != root {
-		t.Fatalf("segments=%v", page.Segments)
-	}
-	if page.Home == "" {
-		t.Fatal("home missing")
+	for _, tc := range []struct {
+		name, path string
+		err        error
+		want       int
+		cancelled  bool
+	}{
+		{"selected", path, nil, 200, false}, {"cancelled", "", nativeui.ErrCancelled, 200, true}, {"unavailable", "", errors.New("no desktop"), 503, false}, {"relative", "relative", nil, 500, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &consoleHandler{nativePicker: func(context.Context) (string, error) { return tc.path, tc.err }}
+			req := httptest.NewRequest("POST", consoleAPI+"native/folder", strings.NewReader(`{"confirm":true}`))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			c.chooseNativeFolder(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("%d: %s", rec.Code, rec.Body.String())
+			}
+			if rec.Code == 200 {
+				var out struct {
+					Path      string
+					Cancelled bool
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+					t.Fatal(err)
+				}
+				if out.Cancelled != tc.cancelled || (!out.Cancelled && out.Path != path) {
+					t.Fatalf("response=%+v", out)
+				}
+			}
+		})
 	}
 }
-func TestConsoleBrowseRejectsRelativeAndMissingPaths(t *testing.T) {
+func TestConsoleNativeDialogIsExplicitAndAuthenticated(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "alpha")
-	c := consoleLogin(t, rt)
-	if res := c.request(t, "GET", "fs?path=relative/path", nil); res.Code != 400 {
-		t.Fatalf("relative=%d", res.Code)
-	}
-	if res := c.request(t, "GET", "fs?path="+filepath.Join(t.TempDir(), "missing"), nil); res.Code != 404 {
-		t.Fatalf("missing=%d", res.Code)
-	}
 	anonymous := &consoleTestClient{handler: rt.consoleHandler()}
-	if res := anonymous.request(t, "GET", "fs", nil); res.Code != 401 {
+	if res := anonymous.request(t, "POST", "native/folder", map[string]any{"confirm": true}); res.Code != 401 {
 		t.Fatalf("anonymous=%d", res.Code)
 	}
-}
-func TestConsoleBrowseFallsBackToHome(t *testing.T) {
-	rt := newWorkspaceRuntime(t, "alpha")
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("no home directory")
-	}
 	c := consoleLogin(t, rt)
-	response := c.request(t, "GET", "fs", nil)
-	if response.Code != 200 {
-		t.Fatalf("browse=%d %s", response.Code, response.Body.String())
+	if res := c.request(t, "POST", "native/folder", map[string]any{}); res.Code != 400 {
+		t.Fatalf("unsolicited=%d", res.Code)
 	}
-	var page struct{ Path string }
-	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+	c.csrf = "invalid"
+	if res := c.request(t, "POST", "native/folder", map[string]any{"confirm": true}); res.Code != 403 {
+		t.Fatalf("csrf=%d", res.Code)
+	}
+	if res := c.request(t, "GET", "fs?path=/", nil); res.Code != 404 {
+		t.Fatalf("obsolete directory enumeration route=%d", res.Code)
+	}
+}
+func TestSelectedDirectoryValidationDoesNotBrowse(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "file")
+	if err := os.WriteFile(file, []byte("not inspected"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if page.Path != filepath.Clean(home) {
-		t.Fatalf("default path=%q want home %q", page.Path, home)
+	if err := validateSelectedDirectory(root); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"", "relative", file, filepath.Join(root, "missing")} {
+		if validateSelectedDirectory(path) == nil {
+			t.Fatalf("accepted %q", path)
+		}
 	}
 }

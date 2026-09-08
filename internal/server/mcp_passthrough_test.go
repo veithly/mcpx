@@ -93,7 +93,7 @@ for line in sys.stdin:
 	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
 	remoteID := opened["remote_session_id"].(string)
 	request := map[string]any{
-		"action": "call", "remote_session_id": remoteID, "purpose": "exercise transparent MCP result", "intent": "test operation",
+		"action": "call", "remote_session_id": remoteID, "purpose": "exercise transparent MCP result",
 		"server": "fake", "tool": "passthrough", "arguments": map[string]any{"value": "one"}, "idempotency_key": "mcp-passthrough-1",
 	}
 
@@ -198,7 +198,7 @@ for line in sys.stdin:
 	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
 	remoteID := opened["remote_session_id"].(string)
 	request := map[string]any{
-		"action": "call", "remote_session_id": remoteID, "purpose": "exercise upstream business failure", "intent": "test operation",
+		"action": "call", "remote_session_id": remoteID, "purpose": "exercise upstream business failure",
 		"server": "failing", "tool": "fail", "arguments": map[string]any{}, "idempotency_key": "mcp-failure-1",
 	}
 	waiting := callEnvelope(t, rt.toolHandlers["mcp_tool"], context.Background(), request)

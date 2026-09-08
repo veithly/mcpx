@@ -16,14 +16,6 @@ import (
 
 func callEnvelope(t *testing.T, handler mcp.ToolHandler, ctx context.Context, arguments map[string]any) map[string]any {
 	t.Helper()
-	if _, exists := arguments["intent"]; !exists {
-		withIntent := make(map[string]any, len(arguments)+1)
-		for key, value := range arguments {
-			withIntent[key] = value
-		}
-		withIntent["intent"] = "test operation"
-		arguments = withIntent
-	}
 	result, err := handler(ctx, mcpresult.Request(arguments))
 	if err != nil {
 		t.Fatal(err)

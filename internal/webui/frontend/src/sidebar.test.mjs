@@ -1,6 +1,27 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sortSessions, sortWorkspaces, isWorking, sessionTarget, workspaceTarget, canDrop, workingLabel } from './sidebar-model.ts';
+import { sortSessions, sortWorkspaces, isWorking, sessionTarget, workspaceTarget, canDrop, workingLabel, preferredSession, sessionURL, workspaceTitle } from './sidebar-model.ts';
+test('recent-command projects outrank pins, polling does not activate a project',()=>{
+ const active=workspace('active',{is_active:true}),pinned=workspace('pinned',{pinned:true}),poll=workspace('poll',{working_sessions:1});
+ assert.deepEqual(sortWorkspaces([pinned,poll,active]).map(x=>x.name),['active','pinned','poll']);
+ active.is_active=false;assert.equal(sortWorkspaces([pinned,poll,active])[0].name,'pinned');
+});
+test('workspace resolves the actual running session before pins and unrelated sessions',()=>{
+ const members=[session('pin',{pinned:true}),session('run',{running_tasks:1}),session('other',{workspace:'beta',running_tasks:2})];
+ assert.equal(preferredSession(workspace('alpha'),members),'run');
+ assert.equal(preferredSession(workspace('alpha',{preferred_session_id:'unpaged-session'}),members),'unpaged-session');
+});
+test('workspace moves cannot cross the live command priority group',()=>{
+ const active=workspaceTarget(workspace('alpha',{is_active:true}));
+ const idle=workspaceTarget(workspace('beta'));
+ assert.equal(canDrop(active,idle),false);
+ assert.equal(canDrop(active,workspaceTarget(workspace('gamma',{is_active:true}))),true);
+});
+test('parallel URLs preserve complete session identifiers and unicode workspace title',()=>{
+ const params=new URLSearchParams(sessionURL('设计 & 开发','full-session-id-with-dashes').slice(1));
+ assert.equal(params.get('workspace'),'设计 & 开发');assert.equal(params.get('session'),'full-session-id-with-dashes');
+ assert.equal(workspaceTitle('设计 & 开发'),'设计 & 开发');assert.equal(workspaceTitle(''),'MCPX');
+});
 const session=(id,extra={})=>({id,workspace:'alpha',label:id,description:'',status:'active',last_active_at:100,running_tasks:0,...extra});
 const workspace=(name,extra={})=>({name,path:'/projects/'+name,description:'',access_mode:'approval',...extra});
 test('running sessions outrank pins and manual positions',()=>{

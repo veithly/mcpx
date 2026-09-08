@@ -87,10 +87,13 @@ type Runtime struct {
 	closeErr          error
 
 	// For schema revision and capability catalog.
-	toolIndex    map[string]mcp.Tool
-	toolIndexMu  sync.RWMutex
-	toolHandlers map[string]mcp.ToolHandler
-	toolMeta     map[string]toolAnnotation
+	toolIndex         map[string]mcp.Tool
+	toolIndexMu       sync.RWMutex
+	toolHandlers      map[string]mcp.ToolHandler
+	toolMeta          map[string]toolAnnotation
+	toolResponseOnce  sync.Once
+	toolResponseSlots chan struct{}
+	toolRecoverySlots chan struct{}
 	// idempotency is shared by clean-core mutating tools and persists replay
 	// records in the Runtime state database.
 	idempotency     *idempotency.Store
@@ -761,7 +764,9 @@ func (r *Runtime) resultJSON(resp envelope.Response) (*mcp.CallToolResult, error
 	if err := json.Unmarshal(b, &wire); err != nil {
 		return mcpresult.NewError(err.Error()), nil
 	}
-	return mcpresult.NewStructured(wire, envelopeHumanSummary(resp)), nil
+	result := mcpresult.NewStructured(wire, envelopeHumanSummary(resp))
+	result.IsError = resp.Status == envelope.StatusError
+	return result, nil
 }
 
 func envelopeHumanSummary(resp envelope.Response) string {

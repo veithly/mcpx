@@ -2,10 +2,10 @@ version: "2.0"
 priority: high
 summary: 使用 MCPX 的结构化工具完成开发工作；模型负责工程判断，Runtime 负责协议、安全、恢复与观测。
 rules:
-  - 每个开发会话必须绑定用户实际指定的项目。已注册项目按 workspace 名称打开；未注册的已有目录直接调用 session(workspace_path=用户明确指定的绝对路径)，无需借用 mcpx 或任何其他项目来注册。没有目标时不要选择列表第一项或 Runtime 启动目录作为默认值；切换项目必须使用对应的会话，不能复用旧 remote_session_id 再用 cd 假装切换归属。恢复时核对返回的 workspace_name/workspace_path；名称或路径冲突必须纠正，不得忽略。删除的 Workspace 需操作员从工作台重新添加，不能通过旧会话自动恢复。
+  - 工具失败不等于 MCPX 不可用：先读 error、stdout/stderr、exit_code 和 next_action，修正参数或命令后继续目标。retryable=false 表示不要原样盲重试，summarize 不表示结束任务。超时、502或空响应意味着结果可能未知：先用原 request_id/Task/Operation/文件 revision 核对；只读可有限重试，写操作先查副作用并复用幂等键，必要时换已知支持的检查路径。不得绕过权限拒绝或用户取消；确实无法恢复时报告具体阻塞，不要只说工具坏了。长工作使用 Task/operation_batch 与 attach/wait。
+  - 开发会话绑定用户实际指定的项目：已注册项目用 workspace；未注册的已有目录用 session(workspace_path=用户明确指定的绝对路径)，不借用 mcpx 中转，不默认选列表第一项或 Runtime 启动目录。切换项目使用对应会话，不能复用旧 remote_session_id 再用 cd 假装切换；恢复时核对 workspace_name/workspace_path 并纠正冲突。删除的 Workspace 仅由操作员从工作台重新添加。
   - 工具的 structuredContent 是机器事实来源；remote_session_id、plan_id、plan_task_id、execution_task_id、operation_id、artifact_id、sha256、revision 和 confirmation token 必须从服务端结果原样复用，不要从展示文本解析或凭记忆重建。
   - remote_session_id 丢失、未知或返回 not_found 时，先调用 session(action=list，可带 workspace/query/status) 发现已有 Remote Session；根据 workspace、label、status 和 last_active_at 识别目标，再用返回的完整 remote_session_id 调用 session(action=open) 恢复，不要通过新建 Session 假装 resume。
-  - 不要猜测路径、API、符号、ID、revision、工具能力或执行结果；先用对应的只读工具取得证据。没有成功工具结果或验证证据时，不得声称已读取、修改、修复、构建或测试通过。
   - 每种语义使用唯一 canonical tool：源码/文件读取用 read，环境事实用 environment_read，文件变更用 edit，删除/移出用 move_out，命令/测试/构建用 execute，Session/Task/Plan/历史/日志用 observe；不要用 execute 代替文件或环境读取。
   - 修改前取得足够的当前证据并保留用户未要求的现有变更；只提交完成目标所需的最小改动。update/rename 使用服务端返回的最新 base_sha256，保持原文件编码、BOM、换行和末尾换行。
   - effectful 工具的 purpose 必须真实描述当前用户目标、对象和实际影响；测试会执行项目代码，构建可能写缓存或产物，安装/发布/推送/部署/删除等不得虚构为只读或虚构用户授权。
@@ -13,11 +13,11 @@ rules:
   - 删除、移除或清理只使用 move_out 的 prepare → 用户确认 → submit 协议；confirmation_uuid 和冻结参数由服务端绑定，submit 只按服务端返回的确认动作继续，不要改用 execute 删除。
   - execute 只运行目标确实需要的命令；按真实副作用描述 purpose，并以实际 exit_code/stdout/stderr/Task 状态作为验证证据。长任务返回 execution_task_id 后，用 observe(task/logs) 或 execute(attach) 继续。临时多行 Python/Node 且不创建 Workspace 文件时，可用 execute(action=run, runtime=python|node, script=...)。
   - observe 只观察 Runtime：无目标参数默认 session，execution_task_id 推导 task，plan_task_id 推导 plan，history 过滤条件推导 history，execution_task_id 配合 view=logs 读取日志；Workspace 当前静态内容始终使用 read。
-  - 会话内实质工作必须持续提交公开 Activity：新工作 turn 的首个实质工具调用必须携带 activity.intent；后续获得新的可核验事实、形成稳定结论或选择新的立即动作时，必须在对应工具调用中提交 activity.evidence、activity.conclusion 或 activity.next。纯 heartbeat、重复读取状态或语义未变化的调用可以省略 activity。一次调用可同时填写 intent/hypothesis/evidence/conclusion/next/status，但只填写本次发生实质变化的字段，不重复未变化内容。intent 是整个工作 turn 的目标；hypothesis 是可被后续证据推翻的暂定判断；evidence 只记录刚获得的可核验事实，不夹带推断；conclusion 是由 evidence 支持的当前稳定判断；next 应与本次正在发起的 tool call 对齐；status 只表示无法归入前五类的阶段、等待或阻塞变化，不作为 heartbeat，也不替代 progress 的业务里程碑。Runtime 按固定顺序展开非空字段并自动生成 turn_id、sequence、state=preparing_action、related_call_id；这些协议字段不得由客户端维护。Activity 内容只能是可展示的公开工作摘要，不是隐藏推理链。
+  - 会话内实质工作提交公开 Activity：新 turn 首次实质调用必须携带 activity.intent；新事实用 activity.evidence，证据支持的判断用 activity.conclusion，立即动作用 activity.next。可同次提供 intent/hypothesis/evidence/conclusion/next/status，仅填发生变化的项。intent 是本轮目标；hypothesis 是待验证假设；evidence 不夹带推断；next 必须对应本次调用；status 仅用于阶段/阻塞变化，不是 heartbeat 或 progress 替代。turn_id、sequence、state、related_call_id 由 Runtime 生成；只写公开工作摘要，不含隐藏推理链。
   - Session 返回的 extension_inventory 是当前可用能力的一部分，不是单纯元数据；当 Skill 或 MCP 明显匹配、很可能匹配或能提供领域专用工作流时，优先评估该扩展。Skill 的发现、详情读取和调用统一使用 skill_tool：不知道有哪些时 list；知道名字但缺少详细规则时 describe；已有足够信息时 call。模型不得维护 Skill revision token，Runtime 负责一致性校验。
   - 上游 MCP Server/Tool 的发现、详情读取和调用统一使用 mcp_tool：不知道 Server 时 list；知道 Server 但不知道 Tools 时 list(server)；缺少 Tool schema 时 describe；参数已知时 call。模型不得维护 MCP schema revision token，Runtime 负责一致性校验。
   - progress 不作为每次工具调用的 bookkeeping；过程只在有业务意义的里程碑、等待用户、阻塞或失败时发布。任务正常完成并准备给用户最终回复前，必须调用一次 progress(status="completed")，用 current 汇总完成状态、result 列出已验证结果；若终止于等待、阻塞或失败，则使用对应 terminal status。
-  - 验证遵循“最小充分证据”：优先运行与改动直接相关的检查，再按风险扩大；明确区分已验证事实、未验证事项和服务端报告的限制。
+  - 验证遵循“最小充分证据”：不要猜测路径、API、符号、ID、revision、工具能力或执行结果，先用对应只读工具取得证据；优先运行直接相关检查，再按风险扩大。没有成功结果或验证证据时不得声称已读取、修改、修复或测试通过；明确区分已验证事实、未验证事项和服务端限制。
 tool_routing:
   select_workspace: [workspace]
   session_lifecycle: [session]

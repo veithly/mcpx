@@ -3,7 +3,9 @@ import { Activity, ArrowDown, ChevronRight, Folder, FolderPlus, Menu, MessageSqu
 import { api, message, setCSRF } from './api';
 import type { Auth } from './model';
 import { useSidebar } from './useSidebar';
-import { isWorking } from './sidebar-model';
+import { isWorking, preferredSession, sessionURL, workspaceTitle } from './sidebar-model';
+import SessionStrip from './SessionStrip';
+import NativePermissions from './NativePermissions';
 import Login, { Brand } from './Login';
 import Sidebar from './Sidebar';
 import { AccessSettings, AddWorkspace } from './Dialogs';
@@ -41,13 +43,13 @@ function Workbench({ theme, toggleTheme, logout }: { theme: string; toggleTheme:
   const [workspace, setWorkspace] = useState(() => new URLSearchParams(location.hash.slice(1)).get('workspace') || '');
   const [session, setSession] = useState(() => new URLSearchParams(location.hash.slice(1)).get('session') || '');
   const [tab, setTab] = useState('activity'); const [selectedTask, setSelectedTask] = useState('');
-  const [modal, setModal] = useState<'workspace' | 'access' | ''>('');
+  const [modal, setModal] = useState<'workspace' | 'access' | 'permissions' | ''>('');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [error, setError] = useState('');
   const [follow, setFollow] = useState(true);
   const scroller = useRef<HTMLDivElement>(null);
   const live = useWorkspace(workspace, session);
-  const activeSession = snapshot.sessions.find(item => item.id === session);
+  const activeSession = snapshot.sessions.find(item => item.id === session && item.workspace === workspace) || (live.detail.session_info?.id === session && live.detail.session_info.workspace === workspace ? live.detail.session_info : undefined);
   const activeWorkspace = snapshot.workspaces.find(item => item.name === workspace);
   const pending = live.detail.approvals.filter(item => !item.decision).length;
   const unacknowledged = live.detail.requests.filter(item => item.status !== 'acknowledged' && item.status !== 'cancelled').length;
@@ -61,9 +63,19 @@ function Workbench({ theme, toggleTheme, logout }: { theme: string; toggleTheme:
     }
   }, [snapshot, navigation.loaded, workspace, session]);
 
-  useEffect(() => { history.replaceState(null, '', '#' + new URLSearchParams({ workspace, session })); setFollow(true); }, [workspace, session]);
+  useEffect(() => { document.title = workspaceTitle(workspace); return () => { document.title = 'MCPX'; }; }, [workspace]);
+  useEffect(() => { history.replaceState(null, '', sessionURL(workspace, session)); setFollow(true); }, [workspace, session]);
+  useEffect(() => {
+    const restore = () => { const params = new URLSearchParams(location.hash.slice(1)); setWorkspace(params.get('workspace') || ''); setSession(params.get('session') || ''); setSelectedTask(''); setTab('activity'); };
+    window.addEventListener('hashchange', restore); window.addEventListener('popstate', restore);
+    return () => { window.removeEventListener('hashchange', restore); window.removeEventListener('popstate', restore); };
+  }, []);
   useEffect(() => { if (follow && tab === 'activity' && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [live.events, follow, tab]);
-  const choose = (name: string, id = '') => { setWorkspace(name); setSession(id); setSelectedTask(''); setSidebarOpen(false); setTab('activity'); };
+  const choose = (name: string, id?: string) => {
+    const selected = id ?? preferredSession(snapshot.workspaces.find(item => item.name === name), snapshot.sessions);
+    if (name !== workspace || selected !== session) history.pushState(null, '', sessionURL(name, selected));
+    setWorkspace(name); setSession(selected); setSelectedTask(''); setSidebarOpen(false); setTab('activity');
+  };
   const loadMore = navigation.loadMore;
   const viewTask = (id: string, ownerSession?: string) => {
     if (ownerSession) setSession(ownerSession);
@@ -71,11 +83,12 @@ function Workbench({ theme, toggleTheme, logout }: { theme: string; toggleTheme:
   };
   const errorText = navigation.error || error || live.error;
   return <div className="app-shell">
-    <Sidebar snapshot={snapshot} workspace={workspace} session={session} open={sidebarOpen} close={() => setSidebarOpen(false)} choose={choose} add={() => setModal('workspace')} settings={() => setModal('access')} theme={theme} toggleTheme={toggleTheme} logout={() => void logout().catch(cause => setError(message(cause)))} loadMore={() => void loadMore()} loadingMore={loadingMore} busy={navigation.busy} mutate={navigation.mutate}/>
+    <Sidebar snapshot={snapshot} workspace={workspace} session={session} open={sidebarOpen} close={() => setSidebarOpen(false)} choose={choose} add={() => setModal('workspace')} settings={() => setModal('access')} permissions={() => setModal('permissions')} theme={theme} toggleTheme={toggleTheme} logout={() => void logout().catch(cause => setError(message(cause)))} loadMore={() => void loadMore()} loadingMore={loadingMore} busy={navigation.busy} mutate={navigation.mutate}/>
     <main className="workspace-main">
       <header className="main-header"><div className="breadcrumb"><button className="icon-button mobile-only" aria-label="打开任务侧栏" onClick={() => setSidebarOpen(true)}><Menu size={20}/></button><Folder size={15}/><span>{workspace || 'Workspace'}</span><ChevronRight size={13}/><strong>{session ? activeSession?.label || '任务会话' : '项目总览'}</strong></div><div className="header-status"><span className={'connection ' + live.connection}><i/>{({ live: '实时连接', connecting: '连接中', reconnecting: '正在重连', offline: '连接失败', idle: '尚未选择' } as Record<string,string>)[live.connection]}</span><button className={'access-badge ' + live.detail.access_mode} disabled={!workspace} onClick={() => setModal('access')}>{live.detail.access_mode === 'full_access' ? <ShieldOff size={14}/> : <ShieldCheck size={14}/>}<span>{live.detail.access_mode === 'full_access' ? '完全访问' : '审批模式'}</span></button></div></header>
       {errorText && <div className="global-error" role="alert"><span>{errorText}</span><button onClick={() => { live.refresh(); void navigation.refresh(); }}><RefreshCw size={14}/>重新连接</button></div>}
       <div className="workspace-content">
+        {activeWorkspace && <SessionStrip workspace={activeWorkspace} sessions={snapshot.sessions} selected={session} current={activeSession} choose={choose}/>}
         <section className="workspace-heading"><div><span className="eyebrow">{session ? 'AGENT SESSION' : 'WORKSPACE OVERVIEW'}</span><h1>{session ? activeSession?.label || '任务会话' : workspace || '你的工作，从这里开始。'}</h1><p>{session ? activeSession?.description || session : activeWorkspace?.path || '添加一个项目，让工作有迹可循。'}</p>{session && <code className="project-binding">项目目录：{activeSession?.workspace_path || activeWorkspace?.path || '正在核对…'}</code>}</div>{(activeSession ? isWorking(activeSession) : (activeWorkspace?.working_sessions || 0)>0) && <span className="running-pill"><i className="status-dot running"/>正在执行</span>}</section>
         <nav className="tabs" aria-label="任务视图">{[{ id: 'activity', label: '工作流', icon: <Activity size={15}/> }, { id: 'terminal', label: '终端', icon: <TerminalSquare size={15}/> }, { id: 'requests', label: '请求', icon: <MessageSquare size={15}/> }].map(item => <button key={item.id} aria-current={tab === item.id ? 'page' : undefined} className={tab === item.id ? 'active' : ''} onClick={() => setTab(item.id)}>{item.icon}{item.label}{item.id === 'requests' && !!(pending + unacknowledged) && <span className="tab-count">{pending + unacknowledged}</span>}</button>)}</nav>
         {!!pending && tab !== 'requests' && <button className="approval-banner" onClick={() => setTab('requests')}><ShieldCheck size={16}/>{pending} 个操作正在等待审批（也可以直接在 GPT 对话中确认）<ChevronRight size={16}/></button>}
@@ -90,6 +103,7 @@ function Workbench({ theme, toggleTheme, logout }: { theme: string; toggleTheme:
       </div>
     </main>
     {modal === 'workspace' && <AddWorkspace close={() => setModal('')} added={ws => { void navigation.refresh().then(() => choose(ws.name)); }}/>}
+    {modal === 'permissions' && <NativePermissions close={() => setModal('')}/>}
     {modal === 'access' && workspace && <AccessSettings workspace={workspace} mode={live.detail.access_mode} close={() => setModal('')} saved={live.refresh}/>}
   </div>;
 }
