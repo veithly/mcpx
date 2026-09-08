@@ -47,6 +47,9 @@ func New(db *sql.DB) (*Store, error) {
  );
  CREATE TABLE IF NOT EXISTS console_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
  INSERT OR IGNORE INTO console_revision(id,revision) VALUES(1,0);
+ CREATE TABLE IF NOT EXISTS console_sessions (
+  token_hash TEXT PRIMARY KEY, csrf TEXT NOT NULL, expires_at INTEGER NOT NULL
+ );
  CREATE TABLE IF NOT EXISTS workspace_access (
   workspace TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('approval','full_access')), updated_at INTEGER NOT NULL
  );

@@ -31,11 +31,16 @@ func (r *Runtime) beginConsoleCall(ctx context.Context, req envelope.Request) (f
 	}
 	r.consoleMu.Lock()
 	defer r.consoleMu.Unlock()
-	session, err := r.remote.Get(ctx, principal, id)
+	// Admission holds the console lock; cap the database reads so a wedged
+	// state store fails the tool fast instead of serializing every caller
+	// behind this check until the 45s tool deadline.
+	admitCtx, cancelAdmit := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelAdmit()
+	session, err := r.remote.Get(admitCtx, principal, id)
 	if err != nil {
 		return nil, err
 	}
-	if err = r.validateSessionWorkspace(ctx, req, session); err != nil {
+	if err = r.validateSessionWorkspace(admitCtx, req, session); err != nil {
 		return nil, err
 	}
 	if r.consoleCalls == nil {

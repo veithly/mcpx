@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
 	"net/url"
@@ -31,6 +32,7 @@ type Server struct {
 	mu      sync.Mutex
 	codes   map[string]*authCode
 	refresh map[string]*refreshGrant
+	seen    map[[32]byte]time.Time
 }
 
 type authCode struct {
@@ -54,7 +56,7 @@ type refreshGrant struct {
 // NewServer builds an OAuth server. tokenSecret must be non-empty.
 func NewServer(password, serverURL string, tokenSecret []byte, tokenTTL int) *Server {
 	if tokenTTL <= 0 {
-		tokenTTL = 86400
+		tokenTTL = 604800
 	}
 	return &Server{
 		Password:    password,
@@ -65,6 +67,7 @@ func NewServer(password, serverURL string, tokenSecret []byte, tokenTTL int) *Se
 		CIMD:        NewCIMDResolver(),
 		codes:       map[string]*authCode{},
 		refresh:     map[string]*refreshGrant{},
+		seen:        map[[32]byte]time.Time{},
 	}
 }
 
@@ -350,21 +353,41 @@ func (s *Server) ValidateAccessToken(token, issuer, audience string) bool {
 }
 
 // ValidateAccessTokenIdentity validates a token and returns its stable subject.
+// Signature, issuer, and audience are enforced exactly as before; expiration is
+// enforced through the sliding window below, so a client in active use never
+// has to re-authenticate while an abandoned token expires on schedule.
 func (s *Server) ValidateAccessTokenIdentity(token, issuer, audience string) (string, bool) {
 	if token == "" || len(s.TokenSecret) == 0 {
 		return "", false
 	}
-	parsed, err := jwt.Parse(token, func(t *jwt.Token) (any, error) {
-		if t.Method != jwt.SigningMethodHS256 {
-			return nil, fmt.Errorf("unexpected alg")
-		}
+	// WithoutClaimsValidation disables the parser's time checks; iss/aud/exp
+	// are validated manually so expiration can slide on activity.
+	parsed, err := jwt.NewParser(jwt.WithValidMethods([]string{"HS256"}), jwt.WithoutClaimsValidation()).Parse(token, func(t *jwt.Token) (any, error) {
 		return s.TokenSecret, nil
-	}, jwt.WithAudience(audience), jwt.WithIssuer(issuer))
+	})
 	if err != nil || !parsed.Valid {
 		return "", false
 	}
 	claims, ok := parsed.Claims.(jwt.MapClaims)
 	if !ok {
+		return "", false
+	}
+	gotIssuer, err := claims.GetIssuer()
+	if err != nil || gotIssuer == "" || gotIssuer != issuer {
+		return "", false
+	}
+	aud, err := claims.GetAudience()
+	if err != nil {
+		return "", false
+	}
+	audOK := false
+	for _, a := range aud {
+		if a == audience {
+			audOK = true
+			break
+		}
+	}
+	if !audOK {
 		return "", false
 	}
 	cid, _ := claims["client_id"].(string)
@@ -379,7 +402,60 @@ func (s *Server) ValidateAccessTokenIdentity(token, issuer, audience string) (st
 	if _, err := s.ResolveClient(cid); err != nil {
 		return "", false
 	}
-	return cid, true
+	return cid, s.slideTokenLifetime(token, claims)
+}
+
+// slideTokenLifetime enforces token expiry as a sliding window: every accepted
+// validation re-anchors the window at the current time, so active clients keep
+// working indefinitely while an idle token is rejected once its last use plus
+// TokenTTL has passed. Reports whether the token remains valid.
+func (s *Server) slideTokenLifetime(token string, claims jwt.MapClaims) bool {
+	window := time.Duration(s.TokenTTL) * time.Second
+	now := time.Now()
+	exp, err := claims.GetExpirationTime()
+	expired := err != nil || (exp != nil && !now.Before(exp.Time))
+	if !expired {
+		s.recordTokenSeen(token, now, window)
+		return true
+	}
+	if window <= 0 {
+		return false
+	}
+	digest := sha256.Sum256([]byte(token))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneSeenLocked(now, window)
+	last, seen := s.seen[digest]
+	if seen && last.Add(window).Before(now) {
+		delete(s.seen, digest)
+		return false
+	}
+	if seen {
+		s.seen[digest] = now
+		return true
+	}
+	// Expired with no recorded use (e.g. fresh process): reject without
+	// recording, so a leaked expired token cannot bootstrap sliding state.
+	return false
+}
+
+func (s *Server) recordTokenSeen(token string, now time.Time, window time.Duration) {
+	digest := sha256.Sum256([]byte(token))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneSeenLocked(now, window)
+	if len(s.seen) >= MaxRefreshTokens {
+		return
+	}
+	s.seen[digest] = now
+}
+
+func (s *Server) pruneSeenLocked(now time.Time, window time.Duration) {
+	for k, last := range s.seen {
+		if now.Sub(last) > window {
+			delete(s.seen, k)
+		}
+	}
 }
 
 // EffectiveIssuer returns configured server URL or fallback origin.

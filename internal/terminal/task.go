@@ -771,8 +771,16 @@ func (t *Task) finishLocked(status TaskStatus, code int) {
 	}
 	t.closeFiles()
 	if t.db != nil {
-		_, _ = t.db.Exec(`UPDATE terminal_tasks SET status = ?, exit_code = ?, log_size = ?, log_truncated = ?, limit_reason = ?, finished_at = ?, updated_at = ? WHERE id = ?`,
-			status, code, t.logSize, boolInt(t.logTruncated), t.LimitReason, now.UnixMilli(), now.UnixMilli(), t.ID)
+		// The caller holds t.mu; the pooled SQLite connection can be busy for a
+		// long time, so persist asynchronously with a deadline instead of
+		// blocking every StatusView/LogsFor reader behind this write.
+		db, id, logSize, truncated, limitReason := t.db, t.ID, t.logSize, t.logTruncated, t.LimitReason
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, _ = db.ExecContext(ctx, `UPDATE terminal_tasks SET status = ?, exit_code = ?, log_size = ?, log_truncated = ?, limit_reason = ?, finished_at = ?, updated_at = ? WHERE id = ?`,
+				status, code, logSize, boolInt(truncated), limitReason, now.UnixMilli(), now.UnixMilli(), id)
+		}()
 	}
 }
 

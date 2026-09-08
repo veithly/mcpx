@@ -1,9 +1,12 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -22,20 +25,27 @@ const consoleRoot = "/mcp/app/"
 const consoleAPI = consoleRoot + "api/"
 const consoleCookie = "mcpx_operator"
 
+// Sliding operator sessions: active use keeps the console logged in for as
+// long as the operator keeps using it; only true abandonment expires it.
+const consoleSessionTTL = 7 * 24 * time.Hour
+const consoleRenewInterval = time.Minute
+
 type operatorSession struct {
-	CSRF    string
-	Expires time.Time
+	CSRF       string
+	Expires    time.Time
+	LastStored time.Time
 }
 type loginWindow struct {
 	Started time.Time
 	Count   int
 }
 type consoleHandler struct {
-	runtime  *Runtime
-	mu       sync.Mutex
-	sessions map[string]operatorSession
-	attempts map[string]loginWindow
-	streams  int
+	runtime      *Runtime
+	mu           sync.Mutex
+	sessions     map[string]operatorSession
+	attempts     map[string]loginWindow
+	streams      int
+	nativePicker func(context.Context) (string, error)
 }
 
 func (r *Runtime) consoleHandler() http.Handler {
@@ -46,7 +56,9 @@ func (r *Runtime) consoleHandler() http.Handler {
 	mux.HandleFunc("DELETE "+consoleAPI+"session", c.require(c.logout))
 	mux.HandleFunc("GET "+consoleAPI+"state", c.require(c.state))
 	mux.HandleFunc("POST "+consoleAPI+"sidebar", c.require(c.sidebar))
-	mux.HandleFunc("GET "+consoleAPI+"fs", c.require(c.browse))
+	mux.HandleFunc("GET "+consoleAPI+"native", c.require(c.nativeInfo))
+	mux.HandleFunc("POST "+consoleAPI+"native/folder", c.require(c.chooseNativeFolder))
+	mux.HandleFunc("POST "+consoleAPI+"native/privacy", c.require(c.openPrivacy))
 	mux.HandleFunc("POST "+consoleAPI+"workspaces", c.require(c.addWorkspace))
 	mux.HandleFunc("PUT "+consoleAPI+"access", c.require(c.setAccess))
 	mux.HandleFunc("GET "+consoleAPI+"detail", c.require(c.detail))
@@ -130,14 +142,63 @@ func (c *consoleHandler) authorized(r *http.Request) (operatorSession, bool) {
 	if err != nil {
 		return operatorSession{}, false
 	}
+	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	session, ok := c.sessions[cookie.Value]
-	if ok && !time.Now().Before(session.Expires) {
+	if !ok && c.runtime.control != nil {
+		// Restart recovery: the in-memory map is empty but the session row
+		// survives in the state database.
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		csrf, expires, loadErr := c.runtime.control.LoadConsoleSession(ctx, consoleTokenHash(cookie.Value))
+		cancel()
+		if loadErr == nil && now.Before(expires) {
+			session = operatorSession{CSRF: csrf, Expires: expires, LastStored: now}
+			c.sessions[cookie.Value] = session
+			ok = true
+		} else if loadErr == nil {
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Second)
+			_ = c.runtime.control.DeleteConsoleSession(cleanupCtx, consoleTokenHash(cookie.Value))
+			cancelCleanup()
+		}
+	}
+	if ok && !now.Before(session.Expires) {
 		delete(c.sessions, cookie.Value)
 		ok = false
 	}
 	return session, ok
+}
+
+// renew slides the session window forward on every authenticated request. The
+// database row and cookie are refreshed at most once per minute; the in-memory
+// expiry itself advances on every call.
+func (c *consoleHandler) renew(w http.ResponseWriter, r *http.Request, token string, session operatorSession) {
+	now := time.Now()
+	c.mu.Lock()
+	session.Expires = now.Add(consoleSessionTTL)
+	c.sessions[token] = session
+	persist := c.runtime.control != nil && now.Sub(session.LastStored) >= consoleRenewInterval
+	if persist {
+		session.LastStored = now
+		c.sessions[token] = session
+	}
+	c.mu.Unlock()
+	if persist {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Second)
+		_ = c.runtime.control.SaveConsoleSession(ctx, consoleTokenHash(token), session.CSRF, session.Expires)
+		cancel()
+		http.SetCookie(w, c.consoleCookie(token, int(consoleSessionTTL.Seconds()), r))
+	}
+}
+
+func (c *consoleHandler) consoleCookie(token string, maxAge int, r *http.Request) *http.Cookie {
+	secure := strings.HasPrefix(oauth.OriginFromRequest(r, c.runtime.cfg.Server.TrustProxyHeaders), "https://")
+	return &http.Cookie{Name: consoleCookie, Value: token, Path: consoleRoot, HttpOnly: true, Secure: secure, SameSite: http.SameSiteStrictMode, MaxAge: maxAge}
+}
+
+func consoleTokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 func (c *consoleHandler) require(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -154,6 +215,9 @@ func (c *consoleHandler) require(next http.HandlerFunc) http.HandlerFunc {
 			consoleError(w, 403, "invalid CSRF token")
 			return
 		}
+		if cookie, err := r.Cookie(consoleCookie); err == nil {
+			c.renew(w, r, cookie.Value, session)
+		}
 		next(w, r)
 	}
 }
@@ -163,6 +227,11 @@ func (c *consoleHandler) sessionInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session, ok := c.authorized(r)
+	if ok {
+		if cookie, err := r.Cookie(consoleCookie); err == nil {
+			c.renew(w, r, cookie.Value, session)
+		}
+	}
 	data := map[string]any{"authenticated": ok, "auth_mode": config.EffectiveAuthMode(c.runtime.cfg.Auth), "local": localConsoleRequest(r)}
 	if ok {
 		data["csrf"] = session.CSRF
@@ -231,7 +300,7 @@ func (c *consoleHandler) login(w http.ResponseWriter, r *http.Request) {
 		consoleError(w, 500, "cannot create login session")
 		return
 	}
-	session := operatorSession{CSRF: csrf, Expires: now.Add(12 * time.Hour)}
+	session := operatorSession{CSRF: csrf, Expires: now.Add(consoleSessionTTL), LastStored: now}
 	c.mu.Lock()
 	for key, s := range c.sessions {
 		if !now.Before(s.Expires) {
@@ -249,8 +318,12 @@ func (c *consoleHandler) login(w http.ResponseWriter, r *http.Request) {
 	c.sessions[token] = session
 	delete(c.attempts, host)
 	c.mu.Unlock()
-	secure := strings.HasPrefix(oauth.OriginFromRequest(r, c.runtime.cfg.Server.TrustProxyHeaders), "https://")
-	http.SetCookie(w, &http.Cookie{Name: consoleCookie, Value: token, Path: consoleRoot, HttpOnly: true, Secure: secure, SameSite: http.SameSiteStrictMode, MaxAge: 12 * 60 * 60})
+	if c.runtime.control != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		_ = c.runtime.control.SaveConsoleSession(ctx, consoleTokenHash(token), csrf, session.Expires)
+		cancel()
+	}
+	http.SetCookie(w, c.consoleCookie(token, int(consoleSessionTTL.Seconds()), r))
 	consoleJSON(w, 200, map[string]any{"authenticated": true, "csrf": csrf, "expires_at": session.Expires})
 }
 func (c *consoleHandler) logout(w http.ResponseWriter, r *http.Request) {
@@ -258,6 +331,11 @@ func (c *consoleHandler) logout(w http.ResponseWriter, r *http.Request) {
 		c.mu.Lock()
 		delete(c.sessions, cookie.Value)
 		c.mu.Unlock()
+		if c.runtime.control != nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			_ = c.runtime.control.DeleteConsoleSession(ctx, consoleTokenHash(cookie.Value))
+			cancel()
+		}
 	}
 	http.SetCookie(w, &http.Cookie{Name: consoleCookie, Path: consoleRoot, HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 	consoleJSON(w, 200, map[string]bool{"authenticated": false})

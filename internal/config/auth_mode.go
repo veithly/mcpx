@@ -85,11 +85,11 @@ func MaxResultBytes(l LimitsConfig) int {
 	return l.MaxResultBytes
 }
 
-// OAuthTokenTTL seconds; default 86400; clamped 60..604800.
+// OAuthTokenTTL seconds; default 604800 (7 days); clamped 60..604800.
 func OAuthTokenTTL(o OAuthConfig) int {
 	ttl := o.TokenTTL
 	if ttl <= 0 {
-		ttl = 86400
+		ttl = 604800
 	}
 	if ttl < 60 {
 		ttl = 60

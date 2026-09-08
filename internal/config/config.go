@@ -183,7 +183,7 @@ func DefaultConfig() Config {
 		Auth: AuthConfig{
 			Mode:  "",
 			Token: "",
-			OAuth: OAuthConfig{TokenTTL: 86400},
+			OAuth: OAuthConfig{TokenTTL: 604800},
 		},
 		Transport: TransportConfig{SessionIdleTTL: "24h"},
 		Limits:    LimitsConfig{MaxResultBytes: 256 << 10},

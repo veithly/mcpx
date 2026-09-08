@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -15,6 +16,20 @@ import (
 type Store struct {
 	db   *sql.DB
 	path string
+}
+
+// sqliteDSN builds a file DSN whose connection-scoped PRAGMAs apply to every
+// pooled connection, not just the first one. _txlock=immediate makes writers
+// queue politely under busy_timeout instead of failing fast with SQLITE_BUSY
+// when a deferred transaction upgrades mid-flight under concurrency.
+func sqliteDSN(path string) string {
+	query := url.Values{}
+	query.Add("_txlock", "immediate")
+	query.Add("_pragma", "journal_mode(WAL)")
+	query.Add("_pragma", "foreign_keys(ON)")
+	query.Add("_pragma", "busy_timeout(3000)")
+	query.Add("_pragma", "synchronous(NORMAL)")
+	return "file:" + path + "?" + query.Encode()
 }
 
 // Open creates or opens a SQLite database and applies all schema migrations.
@@ -30,28 +45,21 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("secure state directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("open state database: %w", err)
 	}
-	// A single pooled connection keeps connection-scoped PRAGMAs deterministic.
-	// WAL still allows concurrent readers from other MCPX processes.
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	// PRAGMAs ride the DSN so every pooled connection gets them; a small pool
+	// keeps one slow or leaked reader from starving every other caller.
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(0)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	for _, pragma := range []string{
-		"PRAGMA journal_mode = WAL",
-		"PRAGMA foreign_keys = ON",
-		"PRAGMA busy_timeout = 3000",
-		"PRAGMA synchronous = NORMAL",
-	} {
-		if _, err := db.ExecContext(ctx, pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("configure sqlite (%s): %w", pragma, err)
-		}
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("open state database: %w", err)
 	}
 	if err := applyMigrations(ctx, db); err != nil {
 		db.Close()
