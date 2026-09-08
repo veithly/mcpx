@@ -150,6 +150,12 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 		operatorAcks := mcpresult.Arguments(req)["acknowledge_requests"]
 		req = withoutOperatorAcks(req)
 		received := time.Now()
+		// Network-interruption tolerance: the request context dies with the
+		// client's TCP connection, but the tool body, its bookkeeping and its
+		// recorded outcome must survive. Everything below runs detached; the
+		// 45s boundedTool deadline remains the only execution bound.
+		clientCtx := ctx
+		ctx = context.WithoutCancel(ctx)
 		callCtx, runtime := ensureRuntimeContext(ctx, mcpresult.Header(req), received)
 		runtime.StartedAtMs = toolRequestStartedAtMs(req, received)
 		clientName, clientVersion := clientInfoFromContext(callCtx)
@@ -169,6 +175,15 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 		observationRequest, observationParseErr := r.parseEnv(callCtx, req)
 		arguments := mcpresult.Arguments(req)
 		observedArguments := observationArguments(name, arguments)
+		if !internalOperationStep && observationParseErr == nil {
+			if delivered, ok := r.replayDeliver(clientCtx, name, arguments); ok {
+				result = delivered
+				err = nil
+				return result, err
+			}
+			replayEntry := r.toolReplays.begin(r.toolReplayKey(name, arguments))
+			defer r.toolReplayFinish(replayEntry, result, clientCtx.Err() != nil)
+		}
 		var embeddedActivityErr error
 		if observationParseErr == nil {
 			release, admissionErr := r.beginConsoleCall(callCtx, observationRequest)

@@ -83,6 +83,30 @@ func (r *Runtime) remoteResult(envReq envelope.Request, remoteSessionID, workspa
 	return r.resultJSON(resp)
 }
 
+// recentSessionSummaries lists the workspace's most recently active sessions
+// so a stale remote_session_id can be recovered in one round trip instead of
+// forcing a separate session(action=list) call.
+func (r *Runtime) recentSessionSummaries(workspace string, limit int) []map[string]any {
+	out := []map[string]any{}
+	if r.state == nil {
+		return out
+	}
+	rows, err := r.state.DB().Query(`SELECT id, label, status, last_active_at FROM remote_sessions WHERE workspace_name=? ORDER BY last_active_at DESC LIMIT ?`, workspace, limit)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, label, status string
+		var lastActive int64
+		if err := rows.Scan(&id, &label, &status, &lastActive); err != nil {
+			break
+		}
+		out = append(out, map[string]any{"remote_session_id": id, "label": label, "status": status, "last_active_at": lastActive})
+	}
+	return out
+}
+
 func (r *Runtime) remoteError(envReq envelope.Request, remoteSessionID, workspace string, err error) (*mcp.CallToolResult, error) {
 	status, code := envelope.StatusError, "remote_session_error"
 	switch {
@@ -106,9 +130,16 @@ func (r *Runtime) remoteError(envReq envelope.Request, remoteSessionID, workspac
 		message += "; use session(workspace_path=<user-specified existing absolute project path>) to register and open the intended project directly. Never borrow the mcpx workspace or choose the first workspace as a fallback."
 	}
 	if code == "not_found" {
-		message = "remote session not found：remote_session_id 必须原样复制 session 返回的完整值。如果 ID 已丢失或不确定，先调用 session(action=list) 发现已有会话，再用返回的完整 remote_session_id 调用 session(action=open) 恢复；不要直接创建新 Session。"
+		message = "remote session not found：remote_session_id 必须原样复制 session 返回的完整值。如果 ID 已丢失或不确定，先调用 session(action=list) 发现已有会话，再用返回的完整 remote_session_id 调用 session(action=open) 恢复；不要直接创建新 Session。data.recent_sessions 已列出该 workspace 最近活跃会话，可直接取用。"
 	}
-	resp := envelope.Fail(status, envReq.RequestID, workspace, nil, code, message)
+	extra := map[string]any(nil)
+	if code == "not_found" {
+		workspace = strings.TrimSpace(workspace)
+		if workspace != "" {
+			extra = map[string]any{"recent_sessions": r.recentSessionSummaries(workspace, 3)}
+		}
+	}
+	resp := envelope.Fail(status, envReq.RequestID, workspace, extra, code, message)
 	resp.RemoteSessionID = remoteSessionID
 	switch code {
 	case "workspace_not_found":

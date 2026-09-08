@@ -8,9 +8,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -83,6 +85,7 @@ type Runtime struct {
 	consoleMu         sync.Mutex // serializes navigation mutations and call admission
 	workspaceConfigMu sync.Mutex
 	consoleCalls      map[string]consoleLiveCall
+	toolReplays       toolReplayCache // reconnect recovery for interrupted tool calls
 	closeOnce         sync.Once
 	closeErr          error
 
@@ -352,6 +355,10 @@ func buildOAuthServer(cfg *config.Config) (*oauth.Server, error) {
 	return srv, nil
 }
 
+// shutdownGracePeriod bounds how long deploy restarts drain in-flight tool
+// calls after SIGTERM before the process exits.
+const shutdownGracePeriod = 8 * time.Second
+
 // Start serves MCP over Streamable HTTP behind the auth/OAuth gateway.
 func (r *Runtime) Start() error {
 	defer r.Close()
@@ -427,7 +434,24 @@ func (r *Runtime) Start() error {
 		Handler:           gw.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	return srv.ListenAndServe()
+	// Graceful shutdown: launchd sends SIGTERM on every deploy restart. Drain
+	// in-flight tool calls briefly so long tasks receive their responses
+	// instead of a severed connection, then release durable resources.
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.ListenAndServe() }()
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	select {
+	case err := <-serveErr:
+		return err
+	case <-stop:
+		log.Info("shutdown", "reason", "signal", "grace_period", shutdownGracePeriod.String())
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownGracePeriod)
+		defer cancelShutdown()
+		_ = srv.Shutdown(shutdownCtx)
+		r.Close()
+		return nil
+	}
 }
 
 // Close releases durable process resources. It is safe to call more than once.

@@ -53,7 +53,7 @@ func captureNative(parent context.Context, request Request, outputPath string) e
 		if message == "" {
 			message = err.Error()
 		}
-		return fmt.Errorf("screen capture failed: %s; verify desktop session and screen-recording permission", message)
+		return fmt.Errorf("screen capture failed: %s; grant Screen Recording to the mcpx-server binary (identifier com.mcpx.server) in System Settings → Privacy → Screen Recording — the operator workbench native-permissions panel links there — then retry without changing the request", message)
 	}
 	return nil
 }
