@@ -1,11 +1,27 @@
 @media (min-width: 1550px) { .sidebar { width: 285px; }.workspace-content { padding-top: 45px; } }
 @media (max-width: 1050px) { .sidebar { width: 235px; }.workspace-content { padding: 25px 29px 13px; }.main-header { padding: 0 24px; }.connection { display: none; }.app-tag { display: none; }.terminal-search small { max-width: 50%; } }
 @media (max-width: 760px) {
-  .mobile-only { display: inline-flex; }.sidebar { position: fixed; top: 0; left: 0; bottom: 0; width: 280px; z-index: 20; transform: translateX(-100%); transition: transform .18s ease; }.sidebar.open { transform: translateX(0); }.sidebar-backdrop { position: fixed; inset: 0; background: #10151066; z-index: 19; }
-  .main-header { height: 55px; padding: 0 15px; gap: 10px; }.breadcrumb { gap: 7px; }.breadcrumb > strong { max-width: 130px; }.workspace-content { padding: 23px 20px 12px; }.workspace-heading h1 { font-size: 21px; }.workspace-heading { padding-bottom: 17px; }.tabs { gap: 21px; }.tabs button { font-size: 11px; }.access-badge { padding: 6px; }.access-badge > span { display: none; }
-  .workspace-heading { flex-wrap: wrap; align-items: flex-start; gap: 8px; }.workspace-heading > div { flex-basis: 100%; }.project-binding { font-size: 10px; }
-  .terminal-output { min-height: 230px; max-height: 41dvh; }.terminal-search small { display: none; }.event-summary { font-size: 12px; }.empty-state { padding: 53px 0 40px; }.empty-state h2 { font-size: 16px; }.composer textarea { font-size: 13px; }.composer-hint { font-size: 9px; }
+  .mobile-only { display: inline-flex; }.sidebar { position: fixed; top: 0; left: 0; bottom: 0; width: 280px; z-index: 20; transform: translateX(-100%); transition: transform .18s ease; padding-bottom: calc(12px + env(safe-area-inset-bottom)); }.sidebar.open { transform: translateX(0); }.sidebar-backdrop { position: fixed; inset: 0; background: #10151066; z-index: 19; }
+  /* 头部与内容边距压缩，把纵向空间让给任务时间线 */
+  .main-header { height: 48px; padding: 0 12px; gap: 8px; }.breadcrumb { gap: 6px; }.breadcrumb > strong { max-width: 36vw; }
+  .workspace-content { padding: 12px 14px 8px; }
+  .session-strip { margin-bottom: 10px; }
+  .workspace-heading { flex-wrap: wrap; align-items: flex-start; gap: 8px; padding-bottom: 10px; }.workspace-heading > div { flex-basis: 100%; }.workspace-heading h1 { font-size: 18px; margin: 3px 0; }.workspace-heading p, .project-binding { display: none; }
+  .tabs { gap: 18px; }.tabs button { padding: 8px 0 10px; font-size: 12px; }
+  .approval-banner { margin-top: 10px; padding: 9px 11px; }
+  .access-badge { padding: 6px; }.access-badge > span { display: none; }
+  /* 时间线更紧凑，进展摘要允许换行而不是只截一行 */
+  .timeline { padding: 6px 0 14px; }.timeline-entry { padding-bottom: 15px; gap: 10px; }
+  .event-purpose { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .event-summary { font-size: 12px; }
+  /* 终端日志在手机上给更高的可视高度 */
+  .terminal-output { min-height: 180px; max-height: 62dvh; }.terminal-search small { display: none; }
+  /* 输入区压缩：隐藏长提示文案，避免 iOS 聚焦时自动放大 */
+  .composer-area { padding-top: 8px; padding-bottom: max(6px, env(safe-area-inset-bottom)); }.composer-hint { display: none; }
+  .composer textarea { height: 42px; min-height: 42px; padding: 10px 13px 3px; font-size: 16px; }.composer footer { padding: 5px 7px 7px 12px; }
+  .jump-latest { bottom: 106px; }
+  .empty-state { padding: 53px 0 40px; }.empty-state h2 { font-size: 16px; }
   .login-layout { grid-template-columns: 1fr; }.login-story { padding: 25px 28px; border-right: 0; border-bottom: 1px solid var(--border); }.login-editorial { padding: 31px 0 14px; }.login-editorial h1 { font-size: 41px; letter-spacing: -1.8px; margin: 14px 0 17px; }.login-editorial > p { font-size: 13px; }.login-capabilities, .login-story > footer { display: none; }.login-form-panel { padding: 40px 28px 70px; }.login-form { max-width: 420px; }.login-lock { display: none; }.login-form h2 { font-size: 21px; }.login-bottom { bottom: 21px; }.modal { padding: 20px; }
 }
-@media (max-height: 650px) and (min-width: 761px) { .workspace-content { padding-top: 18px; }.workspace-heading { padding-bottom: 12px; }.workspace-heading p { display: none; }.composer textarea { height: 56px; }.empty-state { padding: 35px 0; }.login-editorial { padding: 30px 0; }.login-editorial h1 { font-size: 46px; }.login-capabilities { gap: 13px; margin-top: 25px; } }
+@media (max-height: 650px) and (min-width: 761px) { .workspace-content { padding-top: 18px; }.workspace-heading { padding-bottom: 12px; }.workspace-heading p, .project-binding { display: none; }.composer textarea { height: 42px; min-height: 42px; }.composer-hint { display: none; }.empty-state { padding: 35px 0; }.login-editorial { padding: 30px 0; }.login-editorial h1 { font-size: 46px; }.login-capabilities { gap: 13px; margin-top: 25px; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
