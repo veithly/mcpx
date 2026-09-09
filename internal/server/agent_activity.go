@@ -57,8 +57,8 @@ func embeddedActivityUpdates(input envelope.ActivityInput) ([]embeddedActivityUp
 		if raw == "" {
 			continue
 		}
-		if len(raw) > envelope.MaxIntentBytes {
-			return nil, fmt.Errorf("activity.%s exceeds %d bytes", update.Kind, envelope.MaxIntentBytes)
+		if len(raw) > envelope.MaxActivityBytes {
+			return nil, fmt.Errorf("activity.%s exceeds %d bytes", update.Kind, envelope.MaxActivityBytes)
 		}
 		update.Summary = observation.SanitizeIntent(raw)
 		if update.Summary != "" {

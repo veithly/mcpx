@@ -11,6 +11,7 @@ import (
 
 const (
 	MaxIntentBytes        = 512
+	MaxActivityBytes      = 8 << 10
 	MaxResultSummaryBytes = 8192
 )
 

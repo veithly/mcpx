@@ -45,8 +45,18 @@ func TestEmbeddedActivityUpdatesIgnoreBlankFields(t *testing.T) {
 }
 
 func TestEmbeddedActivityUpdatesRejectOversizedSummary(t *testing.T) {
-	_, err := embeddedActivityUpdates(envelope.ActivityInput{Evidence: strings.Repeat("x", envelope.MaxIntentBytes+1)})
+	_, err := embeddedActivityUpdates(envelope.ActivityInput{Evidence: strings.Repeat("x", envelope.MaxActivityBytes+1)})
 	if err == nil || !strings.Contains(err.Error(), "activity.evidence exceeds") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestEmbeddedActivityUpdatesAcceptsLongEvidenceWithinActivityLimit(t *testing.T) {
+	updates, err := embeddedActivityUpdates(envelope.ActivityInput{Evidence: strings.Repeat("x", envelope.MaxIntentBytes+1)})
+	if err != nil {
+		t.Fatalf("activity evidence should not use the shorter purpose limit: %v", err)
+	}
+	if len(updates) != 1 || updates[0].Kind != "evidence" {
+		t.Fatalf("updates=%+v", updates)
 	}
 }

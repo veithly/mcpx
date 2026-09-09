@@ -282,13 +282,34 @@ func TestInstrumentToolRejectsOversizedEmbeddedActivityBeforeHandler(t *testing.
 	})
 	result, err := instrumented(context.Background(), mcpresult.Request(map[string]any{
 		"remote_session_id": remoteID,
-		"activity":          map[string]any{"intent": strings.Repeat("x", envelope.MaxIntentBytes+1)},
+		"activity":          map[string]any{"intent": strings.Repeat("x", envelope.MaxActivityBytes+1)},
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result == nil || !result.IsError || called {
 		t.Fatalf("oversized activity should fail before handler: result=%+v called=%v", result, called)
+	}
+}
+
+func TestInstrumentToolReturnsPrimaryResultWithLongActivityEvidence(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
+	remoteID := opened["remote_session_id"].(string)
+	called := false
+	instrumented := rt.instrumentTool("read", func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		called = true
+		return mcpresult.NewText("source result"), nil
+	})
+	result, err := instrumented(context.Background(), mcpresult.Request(map[string]any{
+		"remote_session_id": remoteID,
+		"activity":          map[string]any{"evidence": strings.Repeat("x", envelope.MaxIntentBytes+1)},
+	}))
+	if err != nil || result == nil || result.IsError || !called {
+		t.Fatalf("long activity evidence must not hide the primary tool result: result=%+v err=%v called=%v", result, err, called)
+	}
+	if got := mcpresult.FirstText(result); !strings.Contains(got, "source result") {
+		t.Fatalf("primary result was lost: %q", got)
 	}
 }
 

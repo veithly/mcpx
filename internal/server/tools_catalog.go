@@ -223,12 +223,12 @@ func cleanActionTool(name, description string, common map[string]any, branches m
 
 func activityInputSchema() map[string]any {
 	properties := map[string]any{
-		"intent":     stringSchema("当前工作 turn 的目标或要解决的问题；仅在开始新的实质工作 turn 时填写，非空 intent 会开启新 turn，不要用它描述单个工具动作"),
-		"hypothesis": stringSchema("尚未被证据确认、可被后续读取或验证推翻的暂定判断；只在假设新建或发生实质变化时填写，不要把已观察事实写成 hypothesis"),
-		"evidence":   stringSchema("刚刚获得的可核验事实、代码现状、命令结果或其他直接观察；只写事实，不写由事实推导出的判断，并避免重复上一条 evidence"),
-		"conclusion": stringSchema("由已有 evidence 支持的当前稳定判断或问题结论；它是推断结果而不是原始事实，也不是下一步动作"),
-		"next":       stringSchema("基于当前理解选择的立即下一动作；应与本次正在发起的 tool call 对齐，例如“读取自动取消任务”，不要描述更远期计划"),
-		"status":     stringSchema("无法归入前五类但值得公开的当前阶段、等待或阻塞状态；仅在状态发生实质变化时填写，不作为工具 heartbeat，也不替代 progress 的业务里程碑"),
+		"intent":     activityStringSchema("当前工作 turn 的目标或要解决的问题；仅在开始新的实质工作 turn 时填写，非空 intent 会开启新 turn，不要用它描述单个工具动作"),
+		"hypothesis": activityStringSchema("尚未被证据确认、可被后续读取或验证推翻的暂定判断；只在假设新建或发生实质变化时填写，不要把已观察事实写成 hypothesis"),
+		"evidence":   activityStringSchema("刚刚获得的可核验事实、代码现状、命令结果或其他直接观察；只写事实，不写由事实推导出的判断，并避免重复上一条 evidence"),
+		"conclusion": activityStringSchema("由已有 evidence 支持的当前稳定判断或问题结论；它是推断结果而不是原始事实，也不是下一步动作"),
+		"next":       activityStringSchema("基于当前理解选择的立即下一动作；应与本次正在发起的 tool call 对齐，例如“读取自动取消任务”，不要描述更远期计划"),
+		"status":     activityStringSchema("无法归入前五类但值得公开的当前阶段、等待或阻塞状态；仅在状态发生实质变化时填写，不作为工具 heartbeat，也不替代 progress 的业务里程碑"),
 	}
 	return map[string]any{
 		"type":                 "object",
@@ -236,6 +236,12 @@ func activityInputSchema() map[string]any {
 		"properties":           properties,
 		"additionalProperties": false,
 	}
+}
+
+func activityStringSchema(description string) map[string]any {
+	schema := stringSchema(description)
+	schema["maxLength"] = envelope.MaxActivityBytes
+	return schema
 }
 
 func withEmbeddedActivitySchema(tool mcp.Tool) mcp.Tool {
