@@ -213,6 +213,37 @@ func TestRegisterWorkspaceAndLoad(t *testing.T) {
 	}
 }
 
+func TestWriteGlobalReplacesConfigAtomically(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("old: content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.Description = "new content"
+	if err := WriteGlobal(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "old: content") || !strings.Contains(string(data), "description: new content") {
+		t.Fatalf("config replacement = %q", data)
+	}
+	if mode := fileMode(path); mode != 0o600 {
+		t.Fatalf("config mode = %o, want 600", mode)
+	}
+}
+
+func fileMode(path string) os.FileMode {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Mode().Perm()
+}
+
 func TestMergeMCP(t *testing.T) {
 	g := MCPFile{MCPServers: map[string]MCPServer{
 		"github": {Command: "g", Type: "stdio"},

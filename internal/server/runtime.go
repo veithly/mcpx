@@ -293,14 +293,8 @@ func logStartupCredentials(cfg config.Config, oauthEnabled bool, version string)
 		"token_configured", strings.TrimSpace(cfg.Auth.Token) != "",
 		"oauth_password_configured", oauthEnabled && strings.TrimSpace(cfg.Auth.OAuth.Password) != "",
 	}
-	if token := strings.TrimSpace(cfg.Auth.Token); token != "" {
-		fields = append(fields, "token", token)
-	}
-	if oauthEnabled {
-		if password := strings.TrimSpace(cfg.Auth.OAuth.Password); password != "" {
-			fields = append(fields, "oauth_password", password)
-		}
-	}
+	// Never write bearer tokens or OAuth passwords to logs. LaunchAgent logs are
+	// readable by the user account and are routinely collected for diagnostics.
 	logging.With("component", "auth").Info("startup credentials", fields...)
 }
 

@@ -176,6 +176,19 @@ func isOperationChild(ctx context.Context) bool {
 	return value
 }
 
+// withoutCancelPreservingDeadline detaches work from a disconnected client
+// without removing the bounded deadline installed by boundedTool.
+func withoutCancelPreservingDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		return context.Background(), func() {}
+	}
+	detached := context.WithoutCancel(ctx)
+	if deadline, ok := ctx.Deadline(); ok {
+		return context.WithDeadline(detached, deadline)
+	}
+	return detached, func() {}
+}
+
 // changeRequest resolves the authenticated remote session for tools that need
 // workspace-scoped access. The edit flag requires an explicit purpose and an
 // owner/editor role; read-only callers can pass false.

@@ -45,6 +45,19 @@ func TestRuntimeContextGeneratesValuesWithoutHeaders(t *testing.T) {
 	}
 }
 
+func TestWithoutCancelPreservingDeadlineDetachesCancellation(t *testing.T) {
+	parent, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	ctx, release := withoutCancelPreservingDeadline(parent)
+	defer release()
+	if _, ok := ctx.Deadline(); !ok {
+		t.Fatal("detached context lost parent deadline")
+	}
+	cancel()
+	if ctx.Err() != nil {
+		t.Fatalf("detached context inherited cancellation: %v", ctx.Err())
+	}
+}
 func TestRegisteredToolSchemasExcludeClientTimestampAndServerRuntimeContext(t *testing.T) {
 	runtime := newWorkspaceRuntime(t, "demo")
 	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)

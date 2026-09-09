@@ -318,7 +318,8 @@ func RegisterWorkspace(globalPath, absPath string) error {
 	return WriteGlobal(globalPath, cfg)
 }
 
-// WriteGlobal writes config YAML, creating parent dirs.
+// WriteGlobal writes config YAML, creating parent dirs. It replaces the file
+// atomically so a crash or interrupted write cannot leave a truncated config.
 func WriteGlobal(path string, cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -327,7 +328,28 @@ func WriteGlobal(path string, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config.yaml-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}
 	return os.Chmod(path, 0o600)

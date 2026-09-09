@@ -155,11 +155,12 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 		operatorAcks := mcpresult.Arguments(req)["acknowledge_requests"]
 		req = withoutOperatorAcks(req)
 		received := time.Now()
-		// Network-interruption tolerance: the request context dies with the
-		// client's TCP connection, but the tool body, its bookkeeping and its
-		// recorded outcome must survive. Everything below runs detached; the
-		// 45s boundedTool deadline remains the only execution bound.
-		ctx = context.WithoutCancel(ctx)
+		// A dropped client must not cancel execution, but the bounded tool
+		// deadline still must reach the handler. context.WithoutCancel
+		// alone also removes the deadline and can leave a worker running
+		// forever after the response has timed out.
+		ctx, releaseDeadline := withoutCancelPreservingDeadline(ctx)
+		defer releaseDeadline()
 		callCtx, runtime := ensureRuntimeContext(ctx, mcpresult.Header(req), received)
 		runtime.StartedAtMs = toolRequestStartedAtMs(req, received)
 		clientName, clientVersion := clientInfoFromContext(callCtx)
