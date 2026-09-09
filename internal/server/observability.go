@@ -131,6 +131,8 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 	return func(ctx context.Context, req *mcp.CallToolRequest) (result *mcp.CallToolResult, err error) {
 		ctx, _ = ensureRuntimeContext(ctx, mcpresult.Header(req), time.Now())
 		resultCtx := ctx
+		clientCtx := ctx
+		var replayEntry *replayEntry
 		// Keep the entire instrumentation boundary defensive. Handler calls use
 		// callToolSafely below so normal panics retain ARC wrapping; this outer
 		// guard also covers malformed observation metadata or renderer changes.
@@ -141,6 +143,9 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 			}
 			result = ensureToolResponse(resultCtx, name, req, result, err)
 			err = nil // SDK must receive the tool result, not discard it for a Go error.
+			if replayEntry != nil {
+				r.toolReplayFinish(replayEntry, result, clientCtx.Err() != nil)
+			}
 		}()
 		for _, validate := range validators {
 			if validationErr := validate(req); validationErr != nil {
@@ -154,7 +159,6 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 		// client's TCP connection, but the tool body, its bookkeeping and its
 		// recorded outcome must survive. Everything below runs detached; the
 		// 45s boundedTool deadline remains the only execution bound.
-		clientCtx := ctx
 		ctx = context.WithoutCancel(ctx)
 		callCtx, runtime := ensureRuntimeContext(ctx, mcpresult.Header(req), received)
 		runtime.StartedAtMs = toolRequestStartedAtMs(req, received)
@@ -181,8 +185,7 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 				err = nil
 				return result, err
 			}
-			replayEntry := r.toolReplays.begin(r.toolReplayKey(name, arguments))
-			defer r.toolReplayFinish(replayEntry, result, clientCtx.Err() != nil)
+			replayEntry = r.toolReplays.begin(r.toolReplayKey(name, arguments))
 		}
 		var embeddedActivityErr error
 		if observationParseErr == nil {

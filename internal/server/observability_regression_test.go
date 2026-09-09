@@ -360,6 +360,40 @@ func TestCallToolSafelyConvertsHandlerPanic(t *testing.T) {
 		t.Fatalf("safe call did not remain usable after panic: result=%+v err=%v", result, err)
 	}
 }
+func TestInstrumentToolReplaysResultAfterClientDisconnect(t *testing.T) {
+	rt := &Runtime{}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	instrumented := rt.instrumentTool("replay_disconnect", func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		close(started)
+		<-release
+		return mcpresult.NewText("verified latest result"), nil
+	})
+	clientCtx, cancel := context.WithCancel(context.Background())
+	firstDone := make(chan *mcp.CallToolResult, 1)
+	go func() {
+		result, err := instrumented(clientCtx, mcpresult.Request(map[string]any{"remote_session_id": "sess-replay"}))
+		if err != nil {
+			t.Errorf("disconnected call returned error: %v", err)
+		}
+		firstDone <- result
+	}()
+	<-started
+	cancel()
+	close(release)
+	first := <-firstDone
+	if first == nil || first.IsError {
+		t.Fatalf("completed detached call=%+v", first)
+	}
+
+	replayed, ok := rt.replayDeliver(context.Background(), "replay_disconnect", map[string]any{"remote_session_id": "sess-replay"})
+	if !ok || replayed == nil || len(replayed.Content) == 0 {
+		t.Fatalf("disconnect retry did not receive recorded result: ok=%v result=%+v", ok, replayed)
+	}
+	if got := replayed.Content[0].(*mcp.TextContent).Text; got != "verified latest result" {
+		t.Fatalf("replayed text=%q", got)
+	}
+}
 
 func TestStartupSkillDetailsUseDebugAndInfoOnlyCounts(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo", "fyy", "codex")
