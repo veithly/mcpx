@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -116,6 +117,81 @@ func TestObservationRecordsToolLifecycleAndRedacts(t *testing.T) {
 	}
 }
 
+func TestObservationPersistsRequestAddressableToolResult(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	var requestID string
+	wrapped := rt.instrumentTool("observer_result_test", func(ctx context.Context, _ *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		runtime, ok := runtimeContextFrom(ctx)
+		if !ok {
+			t.Fatal("handler did not receive runtime request identity")
+		}
+		requestID = runtime.RequestID
+		return mcpresult.NewStructured(map[string]any{
+			"status": "succeeded",
+			"data":   map[string]any{"value": "persisted"},
+		}, "persisted result"), nil
+	})
+	result, err := wrapped(context.Background(), mcpresult.Request(map[string]any{"workspace": "demo"}))
+	if err != nil || result == nil || result.IsError || requestID == "" {
+		t.Fatalf("tool call failed: result=%+v err=%v request_id=%q", result, err, requestID)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		stored, lookupErr := rt.observation.store.GetToolResult(context.Background(), "demo", "", requestID)
+		if lookupErr == nil {
+			if stored.Tool != "observer_result_test" || stored.Status != "succeeded" || stored.Summary != "persisted result" {
+				t.Fatalf("stored result metadata=%+v", stored)
+			}
+			var wire map[string]any
+			if err := json.Unmarshal(stored.Result, &wire); err != nil {
+				t.Fatalf("stored result is not valid MCP JSON: %v", err)
+			}
+			if wire["content"] == nil {
+				t.Fatalf("stored result lost content: %+v", wire)
+			}
+			return
+		}
+		if !errors.Is(lookupErr, sql.ErrNoRows) {
+			t.Fatalf("lookup persisted result: %v", lookupErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("request-addressable result was not persisted for %q", requestID)
+}
+
+func TestWorkspaceHistoryReadReturnsPersistedToolResult(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	if err := rt.observation.store.SaveToolResult(context.Background(), observation.PersistedToolResult{
+		RequestID: "req_recover", Workspace: "demo", RemoteSessionID: "", Tool: "read", Status: "succeeded",
+		Result: json.RawMessage(`{"content":[{"type":"text","text":"recovered"}],"isError":false}`), Summary: "recovered",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := rt.toolWorkspaceHistoryRead(context.Background(), mcpresult.Request(map[string]any{
+		"workspace": "demo", "request_ids": []any{"req_recover"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := decodeToolResult(t, result)
+	data, ok := wire["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("history data=%+v", wire["data"])
+	}
+	items, ok := data["results"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("history results=%+v", data["results"])
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok || item["request_id"] != "req_recover" || item["tool"] != "read" {
+		t.Fatalf("recovered result=%+v", items[0])
+	}
+	recovered, ok := item["result"].(map[string]any)
+	if !ok || recovered["content"] == nil {
+		t.Fatalf("recovered wire result=%+v", item["result"])
+	}
+}
 func TestObservationAggregatesRemoteSessionLifecycleByWorkspace(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	principal, err := rt.principalFromContext(context.Background())

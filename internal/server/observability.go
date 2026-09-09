@@ -133,6 +133,9 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 		resultCtx := ctx
 		clientCtx := ctx
 		var replayEntry *replayEntry
+		var observationRequest envelope.Request
+		var observedArguments map[string]any
+		var timing interactionTiming
 		// Keep the entire instrumentation boundary defensive. Handler calls use
 		// callToolSafely below so normal panics retain ARC wrapping; this outer
 		// guard also covers malformed observation metadata or renderer changes.
@@ -145,6 +148,27 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 			err = nil // SDK must receive the tool result, not discard it for a Go error.
 			if replayEntry != nil {
 				r.toolReplayFinish(replayEntry, result, clientCtx.Err() != nil)
+			}
+			if r.observation != nil && result != nil {
+				if observationRequest.RequestID == "" {
+					if current, ok := runtimeContextFrom(resultCtx); ok {
+						observationRequest.RequestID = current.RequestID
+					}
+				}
+				if observedArguments == nil {
+					observedArguments = mcpresult.Arguments(req)
+				}
+				if observationRequest.Workspace == "" {
+					observationRequest.Workspace = stringPayload(observedArguments, "workspace")
+				}
+				if observationRequest.RemoteSessionID == "" {
+					observationRequest.RemoteSessionID = stringPayload(observedArguments, "remote_session_id")
+				}
+				recordCtx, cancel := context.WithTimeout(context.WithoutCancel(resultCtx), 2*time.Second)
+				if persistErr := r.observation.RecordToolResult(recordCtx, name, observationRequest, observedArguments, result, timing); persistErr != nil {
+					logging.With("component", "mcp_tool").Error("persist tool result failed", "tool", name, "request_id", observationRequest.RequestID, "error", persistErr)
+				}
+				cancel()
 			}
 		}()
 		for _, validate := range validators {
@@ -177,9 +201,10 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 			callCtx = withCleanCoreRequest(callCtx)
 		}
 		internalOperationStep := isOperationChild(callCtx)
-		observationRequest, observationParseErr := r.parseEnv(callCtx, req)
+		var observationParseErr error
+		observationRequest, observationParseErr = r.parseEnv(callCtx, req)
 		arguments := mcpresult.Arguments(req)
-		observedArguments := observationArguments(name, arguments)
+		observedArguments = observationArguments(name, arguments)
 		if !internalOperationStep && observationParseErr == nil {
 			if delivered, ok := r.replayDeliver(clientCtx, name, arguments); ok {
 				result = delivered
@@ -222,7 +247,7 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 			})
 		}
 		completed := time.Now()
-		timing := makeInteractionTiming(runtime.StartedAtMs, received, completed)
+		timing = makeInteractionTiming(runtime.StartedAtMs, received, completed)
 		runtime = runtimeContextWithTiming(runtime, timing)
 		status := "ok"
 		if err != nil || result == nil || result.IsError {

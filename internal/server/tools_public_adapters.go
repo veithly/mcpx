@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,7 +12,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/mcpresult"
-
 	"mcpx/internal/observation"
 )
 
@@ -77,12 +78,13 @@ func (r *Runtime) toolWorkspaceHistoryRead(ctx context.Context, req *mcp.CallToo
 	if workspaceName == "" {
 		return r.terminalError(envReq, remoteID, "", "workspace_required", "workspace is required for history query")
 	}
+	requestIDs := append(stringSlicePayload(envReq.Payload, "request_ids"), stringPayload(envReq.Payload, "request_id"))
 	query := observation.HistoryQuery{
 		Workspace:        workspaceName,
 		SessionID:        envReq.RemoteSessionID,
 		CallID:           firstString(envReq.CallID, stringPayload(envReq.Payload, "call_id")),
 		EventIDs:         stringSlicePayload(envReq.Payload, "event_ids"),
-		RequestIDs:       append(stringSlicePayload(envReq.Payload, "request_ids"), stringPayload(envReq.Payload, "request_id")),
+		RequestIDs:       requestIDs,
 		OperationIDs:     stringSlicePayload(envReq.Payload, "operation_ids"),
 		PlanTaskIDs:      append(stringSlicePayload(envReq.Payload, "plan_task_ids"), stringPayload(envReq.Payload, "plan_task_id")),
 		ExecutionTaskIDs: append(stringSlicePayload(envReq.Payload, "execution_task_ids"), stringPayload(envReq.Payload, "execution_task_id")),
@@ -109,7 +111,41 @@ func (r *Runtime) toolWorkspaceHistoryRead(ctx context.Context, req *mcp.CallToo
 	for _, event := range events {
 		views = append(views, historyEventView(event))
 	}
-	return r.remoteResult(envReq, remoteID, workspaceName, map[string]any{"workspace": workspaceName, "events": views, "next_cursor": nextCursor, "count": len(views)})
+	response := map[string]any{"workspace": workspaceName, "events": views, "next_cursor": nextCursor, "count": len(views)}
+	if len(requestIDs) > 0 {
+		results := make([]map[string]any, 0, len(requestIDs))
+		seen := make(map[string]struct{}, len(requestIDs))
+		for _, requestID := range requestIDs {
+			requestID = strings.TrimSpace(requestID)
+			if requestID == "" {
+				continue
+			}
+			if _, ok := seen[requestID]; ok {
+				continue
+			}
+			seen[requestID] = struct{}{}
+			stored, lookupErr := r.observation.store.GetToolResult(ctx, workspaceName, envReq.RemoteSessionID, requestID)
+			if errors.Is(lookupErr, sql.ErrNoRows) {
+				continue
+			}
+			if lookupErr != nil {
+				return r.terminalError(envReq, remoteID, workspaceName, "result_query_error", lookupErr.Error())
+			}
+			var wire any
+			if err := json.Unmarshal(stored.Result, &wire); err != nil {
+				return r.terminalError(envReq, remoteID, workspaceName, "result_decode_error", err.Error())
+			}
+			results = append(results, map[string]any{
+				"request_id": stored.RequestID, "workspace": stored.Workspace, "remote_session_id": stored.RemoteSessionID,
+				"call_id": stored.CallID, "operation_id": stored.OperationID, "step_id": stored.StepID,
+				"tool": stored.Tool, "status": stored.Status, "result": wire, "summary": stored.Summary,
+				"execution_task_id": stored.ExecutionTaskID, "exit_code": stored.ExitCode,
+				"created_at": stored.CreatedAt, "updated_at": stored.UpdatedAt,
+			})
+		}
+		response["results"] = results
+	}
+	return r.remoteResult(envReq, remoteID, workspaceName, response)
 }
 
 func historyEventView(event observation.Event) map[string]any {
@@ -126,6 +162,18 @@ func historyEventView(event observation.Event) map[string]any {
 		"skill_name": event.SkillName, "mcp_server": event.MCPServer, "mcp_tool": event.MCPTool,
 		"path": event.Path, "resource_uri": event.ResourceURI, "stream": event.Stream,
 		"offset": event.Offset, "truncated": event.Truncated, "created_at": event.CreatedAt,
+	}
+	if len(event.Input) > 0 {
+		var input any
+		if json.Unmarshal(event.Input, &input) == nil {
+			view["input"] = input
+		}
+	}
+	if len(event.Output) > 0 {
+		var output any
+		if json.Unmarshal(event.Output, &output) == nil {
+			view["output"] = output
+		}
 	}
 	if event.ExitCode != nil {
 		view["exit_code"] = *event.ExitCode

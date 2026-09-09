@@ -284,6 +284,9 @@ func connect(ctx context.Context, srv config.MCPServer, timeout time.Duration, o
 	session, err := client.Connect(connectCtx, &mcp.CommandTransport{Command: cmd}, nil)
 	if err != nil {
 		cancel()
+		if connectErr := connectCtx.Err(); connectErr != nil {
+			return nil, func() {}, connectErr
+		}
 		return nil, func() {}, fmt.Errorf("connect upstream mcp: %w", err)
 	}
 	if !stopProcessOnHandshakeFailure() {

@@ -771,16 +771,13 @@ func (t *Task) finishLocked(status TaskStatus, code int) {
 	}
 	t.closeFiles()
 	if t.db != nil {
-		// The caller holds t.mu; the pooled SQLite connection can be busy for a
-		// long time, so persist asynchronously with a deadline instead of
-		// blocking every StatusView/LogsFor reader behind this write.
-		db, id, logSize, truncated, limitReason := t.db, t.ID, t.logSize, t.logTruncated, t.LimitReason
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_, _ = db.ExecContext(ctx, `UPDATE terminal_tasks SET status = ?, exit_code = ?, log_size = ?, log_truncated = ?, limit_reason = ?, finished_at = ?, updated_at = ? WHERE id = ?`,
-				status, code, logSize, boolInt(truncated), limitReason, now.UnixMilli(), now.UnixMilli(), id)
-		}()
+		// Persist completion before publishing done. Runtime.Close can close the
+		// shared database immediately after Wait returns; an async update here
+		// would race that close and leave SQLite sidecars behind.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = t.db.ExecContext(ctx, `UPDATE terminal_tasks SET status = ?, exit_code = ?, log_size = ?, log_truncated = ?, limit_reason = ?, finished_at = ?, updated_at = ? WHERE id = ?`,
+			status, code, t.logSize, boolInt(t.logTruncated), t.LimitReason, now.UnixMilli(), now.UnixMilli(), t.ID)
 	}
 }
 

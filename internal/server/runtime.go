@@ -559,6 +559,7 @@ func (r *Runtime) runRetention(ctx context.Context) {
 	}
 	logging.With("component", "state_retention").Info("state cleanup completed",
 		"observation_events", report.DeletedObservationEvents,
+		"tool_results", report.DeletedToolResults,
 		"terminal_tasks", report.DeletedTerminalTasks,
 		"file_snapshots", report.DeletedFileSnapshots,
 		"environment_snapshots", report.DeletedEnvironmentSnaps,

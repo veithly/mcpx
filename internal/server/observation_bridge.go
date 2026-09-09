@@ -258,6 +258,42 @@ func (b *observationBridge) RecordToolCompleted(ctx context.Context, name string
 	})
 }
 
+// RecordToolResult stores the exact normalized MCP result under request_id.
+// Unlike timeline recording this is synchronous and detached from the caller,
+// so a disconnected client cannot cause the recovery copy to be dropped.
+func (b *observationBridge) RecordToolResult(ctx context.Context, name string, req envelope.Request, args map[string]any, result *mcp.CallToolResult, timing interactionTiming) error {
+	if b == nil || b.store == nil || strings.TrimSpace(req.RequestID) == "" || result == nil {
+		return nil
+	}
+	workspace, remoteID := b.target(ctx, req)
+	if workspace == "" {
+		// A result without a workspace cannot be safely scoped for later recovery.
+		// It is still returned to the live caller and remains covered by ordinary
+		// protocol/error logging; do not turn this into a noisy persistence error.
+		return nil
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("marshal tool result: %w", err)
+	}
+	if len(raw) > observation.MaxToolResultBytes {
+		return fmt.Errorf("tool result exceeds %d bytes", observation.MaxToolResultBytes)
+	}
+	facts := toolObservationFacts(name, args, result, timing)
+	status := "succeeded"
+	if result.IsError {
+		status = "failed"
+	} else if value := publicResultStatus(result); value != "" {
+		status = value
+	}
+	return b.store.SaveToolResult(ctx, observation.PersistedToolResult{
+		RequestID: req.RequestID, Workspace: workspace, RemoteSessionID: remoteID,
+		CallID: observationCallID(req), OperationID: req.OperationID, StepID: req.StepID,
+		Tool: name, Status: status, Result: raw, Summary: firstToolText(result),
+		ExecutionTaskID: facts.ExecutionTaskID, ExitCode: facts.ExitCode,
+	})
+}
+
 func publicResultStatus(result *mcp.CallToolResult) string {
 	if result == nil {
 		return ""
@@ -301,6 +337,9 @@ func toolObservationFacts(name string, args map[string]any, result *mcp.CallTool
 	data := businessDataFromResult(result)
 	if workingDirectory, ok := data["working_directory"].(string); ok {
 		facts.WorkingDirectory = workingDirectory
+	}
+	if executionTaskID, ok := data["execution_task_id"].(string); ok {
+		facts.ExecutionTaskID = strings.TrimSpace(executionTaskID)
 	}
 	if command, ok := data["command"].(string); ok && facts.Command == "" {
 		facts.Command = command

@@ -312,6 +312,39 @@ func TestRetentionDeletesExpiredEphemeralRecords(t *testing.T) {
 	}
 }
 
+func TestRetentionDeletesExpiredToolResults(t *testing.T) {
+	db, service, now := newRetentionTestService(t, "")
+	old := now.Add(-2 * time.Hour).UnixMilli()
+	recent := now.Add(-10 * time.Minute).UnixMilli()
+	_, err := db.Exec(`INSERT INTO tool_results
+		(request_id, workspace_name, remote_session_id, tool_name, status, result_json, created_at, updated_at)
+		VALUES ('old-result', 'demo', 'session', 'execute', 'succeeded', '{}', ?, ?),
+		       ('recent-result', 'demo', 'session', 'execute', 'succeeded', '{}', ?, ?)`, old, old, recent, recent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := service.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.DeletedToolResults != 1 {
+		t.Fatalf("deleted tool results=%d, want 1; report=%+v", report.DeletedToolResults, report)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM tool_results WHERE request_id = 'old-result'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("expired tool result remains")
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM tool_results WHERE request_id = 'recent-result'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatal("recent tool result was deleted")
+	}
+}
+
 func TestRetentionDeletesExpiredOperationsOnlyForClosedSessions(t *testing.T) {
 	db, service, now := newRetentionTestService(t, "")
 	insertRetentionPrincipal(t, db, "principal")

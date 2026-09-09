@@ -28,6 +28,7 @@ type RetentionService struct {
 type RetentionReport struct {
 	Disabled                 bool
 	DeletedObservationEvents int
+	DeletedToolResults       int
 	DeletedTerminalTasks     int
 	DeletedFileSnapshots     int
 	DeletedEnvironmentSnaps  int
@@ -86,6 +87,11 @@ func (s *RetentionService) RunOnce(ctx context.Context) (RetentionReport, error)
 		}
 		report.DeletedObservationEvents += deleted
 	}
+	deleted, err := s.deleteToolResults(ctx, now.Add(-processTTL))
+	if err != nil {
+		return report, fmt.Errorf("delete tool results: %w", err)
+	}
+	report.DeletedToolResults = deleted
 
 	deleted, errors := s.deleteExpiredEphemeral(ctx, now.UnixMilli())
 	if errors != nil {
@@ -135,7 +141,25 @@ func (s *RetentionService) checkpoint(ctx context.Context) (bool, error) {
 
 // TotalDeleted returns the number of rows removed in this pass.
 func (r RetentionReport) TotalDeleted() int {
-	return r.DeletedObservationEvents + r.DeletedTerminalTasks + r.DeletedFileSnapshots + r.DeletedEnvironmentSnaps + r.DeletedEphemeralRecords + r.DeletedOperations
+	return r.DeletedObservationEvents + r.DeletedToolResults + r.DeletedTerminalTasks + r.DeletedFileSnapshots + r.DeletedEnvironmentSnaps + r.DeletedEphemeralRecords + r.DeletedOperations
+}
+
+func (s *RetentionService) deleteToolResults(ctx context.Context, cutoff time.Time) (int, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM tool_results
+		WHERE rowid IN (
+			SELECT rowid FROM tool_results
+			WHERE updated_at < ?
+			ORDER BY updated_at ASC, request_id ASC
+			LIMIT ?
+		)`, cutoff.UnixMilli(), retentionBatchSize)
+	if err != nil {
+		return 0, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(count), nil
 }
 
 func (s *RetentionService) deleteExpiredOperations(ctx context.Context, now int64) (int, error) {
