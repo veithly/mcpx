@@ -245,7 +245,9 @@ func ApplyBatchWithHook(req BatchRequest, beforeWrite func(BatchResult) error) (
 	}
 
 	// Apply writes only after all validation, line counting, and durable
-	// pre-write hooks have completed.
+	// pre-write hooks have completed. A failure partway through is reported
+	// as a BatchWriteError that preserves the failing entry and the exact
+	// written/unwritten boundary for in-doubt recovery.
 	var deleteRoot *os.Root
 	for _, p := range preparedList {
 		if p.edit.Operation == OpDelete {
@@ -260,23 +262,44 @@ func ApplyBatchWithHook(req BatchRequest, beforeWrite func(BatchResult) error) (
 	if deleteRoot != nil {
 		defer deleteRoot.Close()
 	}
-	for _, p := range preparedList {
+	// Logical paths in batch order, used to report the written/unwritten
+	// boundary when a commit-phase write fails partway through.
+	boundaryPaths := make([]string, len(preparedList))
+	for index, p := range preparedList {
+		boundaryPaths[index] = p.edit.Path
+		if p.edit.Operation == OpRename && p.edit.NewPath != "" {
+			boundaryPaths[index] = p.edit.NewPath
+		}
+	}
+	boundaryError := func(failedIndex int, cause error) error {
+		return &BatchWriteError{
+			FailedIndex:  failedIndex,
+			FailedPath:   boundaryPaths[failedIndex],
+			AppliedPaths: append([]string(nil), boundaryPaths[:failedIndex]...),
+			PendingPaths: append([]string(nil), boundaryPaths[failedIndex+1:]...),
+			Err:          cause,
+		}
+	}
+	for index, p := range preparedList {
 		switch p.edit.Operation {
 		case OpCreate, OpUpdate:
 			if err := atomicWrite(p.absPath, p.proposed, p.mode); err != nil {
-				return BatchResult{}, err
+				return BatchResult{}, boundaryError(index, err)
 			}
 		case OpDelete:
 			if err := deleteRoot.Remove(p.edit.Path); err != nil {
-				return BatchResult{}, err
+				return BatchResult{}, boundaryError(index, err)
 			}
+			_ = syncDir(filepath.Dir(p.absPath))
 		case OpRename:
 			if err := os.MkdirAll(filepath.Dir(p.absNew), 0o755); err != nil {
-				return BatchResult{}, err
+				return BatchResult{}, boundaryError(index, err)
 			}
 			if err := os.Rename(p.absPath, p.absNew); err != nil {
-				return BatchResult{}, err
+				return BatchResult{}, boundaryError(index, err)
 			}
+			_ = syncDir(filepath.Dir(p.absNew))
+			_ = syncDir(filepath.Dir(p.absPath))
 		}
 	}
 

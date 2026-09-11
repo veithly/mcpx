@@ -2,7 +2,10 @@
 // the clean-core MCP surface.
 package edit
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // MaxChangedLines is the hard cap on total unified-diff changed lines
 // (insertions + deletions) for one ApplyBatch call.
@@ -91,6 +94,41 @@ type ApplyError struct {
 	// the batch limit. It stays zero for failures that occur before diffing.
 	ChangedLines int
 	Err          error
+}
+
+// BatchWriteError reports a batch whose commit phase failed partway through
+// the filesystem writes. It preserves the failing entry and the exact
+// written/unwritten boundary so callers can surface an in-doubt state with
+// the original error instead of a generic failure.
+type BatchWriteError struct {
+	// FailedIndex is the index into BatchResult.Results of the entry whose
+	// filesystem mutation failed.
+	FailedIndex int
+	// FailedPath is the logical edit path of the failed entry.
+	FailedPath string
+	// AppliedPaths lists logical paths fully committed before the failure.
+	AppliedPaths []string
+	// PendingPaths lists logical paths not touched when the failure happened.
+	PendingPaths []string
+	// Err is the original filesystem error.
+	Err error
+}
+
+func (e *BatchWriteError) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
+	if e.FailedPath != "" {
+		return fmt.Sprintf("write %s: %v", e.FailedPath, e.Err)
+	}
+	return e.Err.Error()
+}
+
+func (e *BatchWriteError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 func (e *ApplyError) Error() string {

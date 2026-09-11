@@ -28,6 +28,9 @@ var (
 	ErrConflict = errors.New("idempotency key has a different request fingerprint")
 	ErrInDoubt  = errors.New("idempotency record is in doubt")
 	ErrPending  = errors.New("idempotency record is still pending")
+	// ErrAbandoned reports that the owner rolled its pending record back
+	// before any effect, so the caller may retry with the same key.
+	ErrAbandoned = errors.New("idempotency request was rolled back before any effect")
 )
 
 type Key struct {
@@ -74,6 +77,18 @@ type Claim struct {
 	Kind   ClaimKind
 	Record Record
 	Done   <-chan struct{}
+	// release force-finishes the in-process flight of an owner claim. It is
+	// the safety net for owners that fail before Complete/MarkInDoubt/Abandon
+	// ran, so waiters never block forever on a dead owner.
+	release func()
+}
+
+// Release force-finishes this owner claim's in-process flight. It is a no-op
+// for non-owner claims and when the flight was already finished or replaced.
+func (c Claim) Release() {
+	if c.release != nil {
+		c.release()
+	}
 }
 
 type flight struct {
@@ -133,6 +148,12 @@ func (s *Store) Claim(ctx context.Context, key Key, fingerprint string, ttl time
 
 	now := s.now().UTC()
 	record, err := s.get(ctx, key)
+	if err == nil && record.State != StatePending && s.dropExpired(ctx, key, record, now) {
+		// An expired terminal record no longer blocks the key: pretend it
+		// never existed so a fresh claim can insert a new pending record.
+		record = Record{}
+		err = sql.ErrNoRows
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		expiresAt := now.Add(ttl)
 		if ttl <= 0 {
@@ -145,8 +166,9 @@ func (s *Store) Claim(ctx context.Context, key Key, fingerprint string, ttl time
 			key.RemoteSessionID, key.PrincipalID, key.Operation, key.Value, fingerprint,
 			StatePending, now.UnixMilli(), now.UnixMilli(), expiresAt.UnixMilli())
 		if insertErr == nil {
-			s.setFlight(identity, fingerprint)
-			return Claim{Kind: ClaimOwner, Record: Record{Key: key, Fingerprint: fingerprint, State: StatePending, CreatedAt: now, UpdatedAt: now, ExpiresAt: expiresAt}}, nil
+			f := s.setFlight(identity, fingerprint)
+			return Claim{Kind: ClaimOwner, Record: Record{Key: key, Fingerprint: fingerprint, State: StatePending, CreatedAt: now, UpdatedAt: now, ExpiresAt: expiresAt},
+				release: func() { s.releaseFlight(identity, f) }}, nil
 		}
 		// Another process may have won the insert race. Re-read its record and
 		// continue through the normal fingerprint/state checks.
@@ -183,9 +205,10 @@ func (s *Store) Claim(ctx context.Context, key Key, fingerprint string, ttl time
 				return Claim{}, updateErr
 			}
 			if count, rowsErr := result.RowsAffected(); rowsErr == nil && count == 1 {
-				s.setFlight(identity, fingerprint)
+				f := s.setFlight(identity, fingerprint)
 				record.UpdatedAt = now
-				return Claim{Kind: ClaimOwner, Record: record}, nil
+				return Claim{Kind: ClaimOwner, Record: record,
+					release: func() { s.releaseFlight(identity, f) }}, nil
 			}
 			record, err = s.get(ctx, key)
 			if err != nil {
@@ -215,9 +238,44 @@ func (s *Store) claimTerminal(record Record) Claim {
 	}
 }
 
-func (s *Store) setFlight(identity, fingerprint string) {
+// dropExpired deletes a terminal record whose expires_at has passed so the
+// key stops being blocked forever by stale failed/in_doubt/succeeded state.
+// Pending records are excluded: their lifecycle is governed by PendingLease.
+// The delete is conditional on the exact expiry stamp read a moment ago, so a
+// record that was completed or refreshed in between is kept.
+func (s *Store) dropExpired(ctx context.Context, key Key, record Record, now time.Time) bool {
+	if !now.After(record.ExpiresAt) {
+		return false
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM clean_idempotency_records
+		WHERE remote_session_id = ? AND principal_id = ? AND operation = ? AND idempotency_key = ?
+		AND fingerprint = ? AND state != ? AND expires_at = ?`,
+		key.RemoteSessionID, key.PrincipalID, key.Operation, key.Value,
+		record.Fingerprint, StatePending, record.ExpiresAt.UnixMilli())
+	if err != nil {
+		return false
+	}
+	affected, err := result.RowsAffected()
+	return err == nil && affected == 1
+}
+
+func (s *Store) setFlight(identity, fingerprint string) *flight {
+	f := &flight{fingerprint: fingerprint, done: make(chan struct{})}
 	s.mu.Lock()
-	s.flights[identity] = &flight{fingerprint: fingerprint, done: make(chan struct{})}
+	s.flights[identity] = f
+	s.mu.Unlock()
+	return f
+}
+
+// releaseFlight force-finishes a specific flight. If the identity has been
+// re-claimed by a newer flight in the meantime, the newer flight is left
+// untouched so a stale owner can never release a live one.
+func (s *Store) releaseFlight(identity string, target *flight) {
+	s.mu.Lock()
+	if current, ok := s.flights[identity]; ok && current == target {
+		delete(s.flights, identity)
+		close(current.done)
+	}
 	s.mu.Unlock()
 }
 
@@ -230,7 +288,13 @@ func (s *Store) Wait(ctx context.Context, claim Claim, key Key) (Record, error) 
 	}
 	select {
 	case <-claim.Done:
-		return s.get(ctx, key)
+		record, err := s.get(ctx, key)
+		if errors.Is(err, sql.ErrNoRows) {
+			// The owner rolled the record back before any effect (see
+			// Abandon): nothing happened and the key is free again.
+			return Record{}, ErrAbandoned
+		}
+		return record, err
 	case <-ctx.Done():
 		return Record{}, ctx.Err()
 	}
@@ -250,10 +314,17 @@ func (s *Store) Complete(ctx context.Context, key Key, fingerprint, state string
 	if metadata == nil {
 		metadata = []byte(`{}`)
 	}
+	// The flight is always released, even when the update fails: a waiter
+	// must never block forever on a dead owner. It re-reads the durable
+	// record and reports the real state.
+	defer s.finishFlight(key.identity())
+	// Only a live (pending) or in-doubt record may transition to a terminal
+	// state. If a lease takeover already completed the record, the stale
+	// owner must not overwrite the durable answer.
 	result, err := s.db.ExecContext(ctx, `UPDATE clean_idempotency_records SET state = ?, response_json = ?, metadata_json = ?, updated_at = ?
-		WHERE remote_session_id = ? AND principal_id = ? AND operation = ? AND idempotency_key = ? AND fingerprint = ?`,
+		WHERE remote_session_id = ? AND principal_id = ? AND operation = ? AND idempotency_key = ? AND fingerprint = ? AND state IN (?, ?)`,
 		state, string(response), string(metadata), now.UnixMilli(), key.RemoteSessionID, key.PrincipalID,
-		key.Operation, key.Value, fingerprint)
+		key.Operation, key.Value, fingerprint, StatePending, StateInDoubt)
 	if err != nil {
 		return err
 	}
@@ -262,7 +333,6 @@ func (s *Store) Complete(ctx context.Context, key Key, fingerprint, state string
 	} else if affected != 1 {
 		return fmt.Errorf("idempotency record disappeared before completion")
 	}
-	s.finishFlight(key.identity())
 	return nil
 }
 
@@ -332,14 +402,17 @@ func (s *Store) MarkInDoubt(ctx context.Context, key Key, fingerprint string, me
 		result sql.Result
 		err    error
 	)
+	// The flight is always released, even when the update fails: a waiter
+	// must never block forever on a dead owner.
+	defer s.finishFlight(key.identity())
 	if metadata == nil {
 		result, err = s.db.ExecContext(ctx, `UPDATE clean_idempotency_records SET state = ?, updated_at = ?
-			WHERE remote_session_id = ? AND principal_id = ? AND operation = ? AND idempotency_key = ? AND fingerprint = ?`,
-			StateInDoubt, s.now().UTC().UnixMilli(), key.RemoteSessionID, key.PrincipalID, key.Operation, key.Value, fingerprint)
+			WHERE remote_session_id = ? AND principal_id = ? AND operation = ? AND idempotency_key = ? AND fingerprint = ? AND state IN (?, ?)`,
+			StateInDoubt, s.now().UTC().UnixMilli(), key.RemoteSessionID, key.PrincipalID, key.Operation, key.Value, fingerprint, StatePending, StateInDoubt)
 	} else {
 		result, err = s.db.ExecContext(ctx, `UPDATE clean_idempotency_records SET state = ?, metadata_json = ?, updated_at = ?
-			WHERE remote_session_id = ? AND principal_id = ? AND operation = ? AND idempotency_key = ? AND fingerprint = ?`,
-			StateInDoubt, string(metadata), s.now().UTC().UnixMilli(), key.RemoteSessionID, key.PrincipalID, key.Operation, key.Value, fingerprint)
+			WHERE remote_session_id = ? AND principal_id = ? AND operation = ? AND idempotency_key = ? AND fingerprint = ? AND state IN (?, ?)`,
+			StateInDoubt, string(metadata), s.now().UTC().UnixMilli(), key.RemoteSessionID, key.PrincipalID, key.Operation, key.Value, fingerprint, StatePending, StateInDoubt)
 	}
 	if err != nil {
 		return err
@@ -351,6 +424,62 @@ func (s *Store) MarkInDoubt(ctx context.Context, key Key, fingerprint string, me
 	}
 	s.finishFlight(key.identity())
 	return nil
+}
+
+// Touch refreshes the lease timestamp of a pending record so a live owner
+// streaming a slow batch write is never treated as expired and taken over
+// by a concurrent claim.
+func (s *Store) Touch(ctx context.Context, key Key, fingerprint string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("idempotency store database is required")
+	}
+	if !key.valid() || strings.TrimSpace(fingerprint) == "" {
+		return fmt.Errorf("idempotency key and fingerprint are required")
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE clean_idempotency_records SET updated_at = ?
+		WHERE remote_session_id = ? AND principal_id = ? AND operation = ? AND idempotency_key = ? AND fingerprint = ? AND state = ?`,
+		s.now().UTC().UnixMilli(), key.RemoteSessionID, key.PrincipalID,
+		key.Operation, key.Value, fingerprint, StatePending)
+	return err
+}
+
+// ReclaimInDoubt hands an in_doubt record back to a live owner after a
+// filesystem reconcile proved the original state is intact, so the same key
+// can re-execute in place instead of being permanently blocked. It only
+// succeeds while the record is still in_doubt with the matching fingerprint.
+func (s *Store) ReclaimInDoubt(ctx context.Context, key Key, fingerprint string) (Claim, error) {
+	if s == nil || s.db == nil {
+		return Claim{}, fmt.Errorf("idempotency store database is required")
+	}
+	if !key.valid() || strings.TrimSpace(fingerprint) == "" {
+		return Claim{}, fmt.Errorf("idempotency key and fingerprint are required")
+	}
+	identity := key.identity()
+	now := s.now().UTC()
+	result, err := s.db.ExecContext(ctx, `UPDATE clean_idempotency_records SET state = ?, updated_at = ?
+		WHERE remote_session_id = ? AND principal_id = ? AND operation = ? AND idempotency_key = ? AND fingerprint = ? AND state = ?`,
+		StatePending, now.UnixMilli(), key.RemoteSessionID, key.PrincipalID,
+		key.Operation, key.Value, fingerprint, StateInDoubt)
+	if err != nil {
+		return Claim{}, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return Claim{}, err
+	} else if affected != 1 {
+		// Another caller already resolved the record; report its real state.
+		record, getErr := s.get(ctx, key)
+		if getErr != nil {
+			return Claim{}, getErr
+		}
+		return s.claimTerminal(record), nil
+	}
+	f := s.setFlight(identity, fingerprint)
+	record, err := s.get(ctx, key)
+	if err != nil {
+		s.releaseFlight(identity, f)
+		return Claim{}, err
+	}
+	return Claim{Kind: ClaimOwner, Record: record, release: func() { s.releaseFlight(identity, f) }}, nil
 }
 
 func (s *Store) Get(ctx context.Context, key Key) (Record, error) {

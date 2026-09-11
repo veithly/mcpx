@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -37,6 +38,48 @@ type storedEditResult struct {
 
 func (s storedEditError) applyError() *edit.ApplyError {
 	return &edit.ApplyError{Code: s.Code, Message: s.Message, Path: s.Path, Index: s.Index, Current: s.Current, ChangedLines: s.ChangedLines}
+}
+
+// editHeartbeatInterval refreshes the pending idempotency lease well inside
+// the store's PendingLease window.
+var editHeartbeatInterval = 10 * time.Second
+
+// startEditHeartbeat keeps a pending idempotency record's lease fresh while a
+// large batch is written, so a live owner is never treated as expired and
+// taken over by a concurrent claim. It stops when stop is closed.
+func (r *Runtime) startEditHeartbeat(ctx context.Context, key idempotency.Key, fingerprint string, stop <-chan struct{}) {
+	if r == nil || r.idempotency == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(editHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_ = r.idempotency.Touch(ctx, key, fingerprint)
+			case <-stop:
+				return
+			}
+		}
+	}()
+}
+
+// editInDoubtMetadata encodes the original commit failure and the
+// written/unwritten boundary for the in-doubt response details.
+func editInDoubtMetadata(err error, boundary *edit.BatchWriteError) []byte {
+	details := map[string]any{
+		"recovery":       "read current file SHA values before retrying",
+		"original_error": err.Error(),
+	}
+	if boundary != nil {
+		details["failed_path"] = boundary.FailedPath
+		details["failed_index"] = boundary.FailedIndex
+		details["applied_paths"] = boundary.AppliedPaths
+		details["pending_paths"] = boundary.PendingPaths
+	}
+	encoded, _ := json.Marshal(details)
+	return encoded
 }
 
 // toolEdit is the clean-core unified file edit entry.
@@ -106,25 +149,39 @@ func (r *Runtime) toolEdit(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 		case idempotency.ClaimConflict:
 			return r.editIdempotencyConflict(envReq, session, fingerprint, claim.Record.Fingerprint)
 		case idempotency.ClaimReplay:
-			return r.replayStoredEdit(envReq, session, claim.Record.Response)
+			return r.replayStoredEdit(envReq, session, claim.Record)
 		case idempotency.ClaimInDoubt:
-			if reconciled, ok := r.reconcilePendingEdit(ctx, envReq, session, principal.ID, claim, idemKey, fingerprint); ok {
+			if reconciled, _, handled := r.reconcilePendingEdit(ctx, envReq, session, principal.ID, claim, idemKey, fingerprint); handled {
 				return reconciled, nil
 			}
-			return r.editIdempotencyInDoubt(envReq, session, claim.Record)
+			// Reconcile proved the workspace still matches the original state
+			// (the batch failed before any write landed): retake the key and
+			// re-execute in place instead of dead-ending on in-doubt.
+			retake, retakeErr := r.idempotency.ReclaimInDoubt(ctx, idemKey, fingerprint)
+			if retakeErr != nil || retake.Kind != idempotency.ClaimOwner {
+				return r.editIdempotencyInDoubt(envReq, session, claim.Record)
+			}
+			claim = retake
 		case idempotency.ClaimWait:
 			record, waitErr := r.idempotency.Wait(ctx, claim, idemKey)
 			if waitErr != nil {
 				return r.editIdempotencyPending(envReq, session, waitErr.Error())
 			}
-			return r.replayStoredEdit(envReq, session, record.Response)
+			return r.replayStoredEdit(envReq, session, record)
 		case idempotency.ClaimPending:
 			return r.editIdempotencyPending(envReq, session, "the same idempotency request is still running")
 		}
 		if claim.Kind == idempotency.ClaimOwner {
-			if reconciled, ok := r.reconcilePendingEdit(ctx, envReq, session, principal.ID, claim, idemKey, fingerprint); ok {
+			if reconciled, _, handled := r.reconcilePendingEdit(ctx, envReq, session, principal.ID, claim, idemKey, fingerprint); handled {
 				return reconciled, nil
 			}
+			// Keep the pending lease fresh while a large batch is written so a
+			// live owner is never taken over as expired; Release is the safety
+			// net that frees waiters even when the terminal store calls fail.
+			defer claim.Release()
+			stopHeartbeat := make(chan struct{})
+			defer close(stopHeartbeat)
+			r.startEditHeartbeat(ctx, idemKey, fingerprint, stopHeartbeat)
 		}
 	}
 
@@ -155,24 +212,49 @@ func (r *Runtime) toolEdit(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	})
 	if err != nil {
 		if preparedPersisted {
+			// The commit phase started, so the workspace may be partially
+			// written. Preserve the original error and the written/unwritten
+			// boundary in the in-doubt response instead of swallowing them.
+			var boundary *edit.BatchWriteError
+			_ = errors.As(err, &boundary)
+			metadata := editInDoubtMetadata(err, boundary)
 			_ = r.saveCleanEditRecord(ctx, session.ID, principal.ID, editID, "in_doubt", preparedResult)
 			if claimed {
-				_ = r.idempotency.MarkInDoubt(ctx, idemKey, fingerprint, []byte(`{"recovery":"read current file SHA values before retrying"}`))
+				_ = r.idempotency.MarkInDoubt(ctx, idemKey, fingerprint, metadata)
 			}
-			return r.editIdempotencyInDoubt(envReq, session, idempotency.Record{Key: idemKey, Fingerprint: fingerprint, State: idempotency.StateInDoubt})
+			r.logAudit(audit.Event{
+				RequestID: envReq.RequestID, RemoteSessionID: session.ID, Workspace: session.WorkspaceName,
+				Tool: "edit", Status: "in_doubt",
+				Detail: map[string]any{"edit_id": editID, "original_error": err.Error()},
+			})
+			return r.editIdempotencyInDoubt(envReq, session, idempotency.Record{
+				Key: idemKey, Fingerprint: fingerprint, State: idempotency.StateInDoubt, Metadata: metadata,
+			})
 		}
 		if claimed {
-			stored := storedEditResult{Error: storedApplyError(err)}
-			encoded, _ := json.Marshal(stored)
-			_ = r.idempotency.Complete(ctx, idemKey, fingerprint, idempotency.StateFailed, encoded, nil)
+			var validationErr *edit.ApplyError
+			if errors.As(err, &validationErr) {
+				// Deterministic validation failure before any filesystem
+				// effect: persist the exact error so the same key replays it.
+				stored := storedEditResult{Error: storedApplyError(err)}
+				encoded, _ := json.Marshal(stored)
+				_ = r.idempotency.Complete(ctx, idemKey, fingerprint, idempotency.StateFailed, encoded, nil)
+			} else {
+				// Transient hook/store failure before any effect: roll the
+				// pending record back so the same key can retry from scratch.
+				_ = r.idempotency.Abandon(ctx, idemKey, fingerprint)
+			}
 		}
 		return r.editToolError(envReq, session, err)
 	}
 	if err := r.saveCleanEditRecord(ctx, session.ID, principal.ID, editID, "succeeded", result); err != nil {
+		metadata := []byte(`{"recovery":"edit record persistence failed; inspect file SHA values"}`)
 		if claimed {
-			_ = r.idempotency.MarkInDoubt(ctx, idemKey, fingerprint, []byte(`{"recovery":"edit record persistence failed; inspect file SHA values"}`))
+			_ = r.idempotency.MarkInDoubt(ctx, idemKey, fingerprint, metadata)
 		}
-		return r.editIdempotencyInDoubt(envReq, session, idempotency.Record{Key: idemKey, Fingerprint: fingerprint, State: idempotency.StateInDoubt})
+		return r.editIdempotencyInDoubt(envReq, session, idempotency.Record{
+			Key: idemKey, Fingerprint: fingerprint, State: idempotency.StateInDoubt, Metadata: metadata,
+		})
 	}
 	if claimed {
 		stored := storedEditResult{EditID: editID, Result: result}

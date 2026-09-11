@@ -40,16 +40,23 @@ func atomicWrite(path string, content []byte, mode os.FileMode) error {
 		return err
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
-		// Windows may need remove-then-rename; keep simple for unix-first.
+		// KNOWN ISSUE (windows): remove-then-rename has a window where the
+		// target path does not exist, so a crash in between destroys the
+		// original file. A proper fix needs MoveFileEx with
+		// MOVEFILE_REPLACE_EXISTING plus directory handle syncing; left as is
+		// for this change set.
 		if runtime.GOOS == "windows" {
 			_ = os.Remove(path)
 			if err2 := os.Rename(temporaryPath, path); err2 != nil {
 				return err2
 			}
+			_ = syncDir(filepath.Dir(path))
 			return nil
 		}
 		return err
 	}
+	// The rename is only durable once its directory entry is synced.
+	_ = syncDir(filepath.Dir(path))
 	return nil
 }
 

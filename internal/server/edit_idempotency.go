@@ -66,15 +66,28 @@ func decodeStoredEdit(encoded []byte) (storedEditResult, error) {
 	return stored, nil
 }
 
-func (r *Runtime) replayStoredEdit(envReq envelope.Request, session remotesession.Session, encoded []byte) (*mcp.CallToolResult, error) {
-	stored, err := decodeStoredEdit(encoded)
+func (r *Runtime) replayStoredEdit(envReq envelope.Request, session remotesession.Session, record idempotency.Record) (*mcp.CallToolResult, error) {
+	stored, err := decodeStoredEdit(record.Response)
 	if err != nil {
 		return r.editIdempotencyPending(envReq, session, err.Error())
 	}
-	if stored.Error != nil {
-		return r.editToolError(envReq, session, stored.Error.applyError())
+	// Replay decisions follow the durable record state, never the stored
+	// payload alone: a pending record pre-stores the full success payload
+	// before the batch is written, so trusting the payload would replay a
+	// partially written batch as a success.
+	switch record.State {
+	case idempotency.StateSucceeded:
+		return r.editToolSuccess(envReq, session, stored.EditID, stored.Result, true)
+	case idempotency.StateInDoubt:
+		return r.editIdempotencyInDoubt(envReq, session, record)
+	case idempotency.StateFailed:
+		if stored.Error != nil {
+			return r.editToolError(envReq, session, stored.Error.applyError())
+		}
+		return r.editToolError(envReq, session, &edit.ApplyError{Code: "EDIT_FAILED", Message: "edit previously failed", Index: -1})
+	default:
+		return r.editIdempotencyPending(envReq, session, fmt.Sprintf("the same idempotency request is still running (state %q)", record.State))
 	}
-	return r.editToolSuccess(envReq, session, stored.EditID, stored.Result, true)
 }
 
 func (r *Runtime) editIdempotencyConflict(envReq envelope.Request, session remotesession.Session, current, original string) (*mcp.CallToolResult, error) {
@@ -205,26 +218,32 @@ func currentSHA(path string) (string, bool, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), true, nil
 }
 
-func (r *Runtime) reconcilePendingEdit(ctx context.Context, envReq envelope.Request, session remotesession.Session, principalID string, claim idempotency.Claim, key idempotency.Key, fingerprint string) (*mcp.CallToolResult, bool) {
+// reconcilePendingEdit compares the stored planned result against the current
+// filesystem. It returns handled=true when the record was resolved here:
+// expected=true heals the record to a success replay; original=false (the
+// batch actually mutated files) re-marks the record in doubt. original=true
+// with handled=false means nothing was written and the same key is safe to
+// re-execute in place.
+func (r *Runtime) reconcilePendingEdit(ctx context.Context, envReq envelope.Request, session remotesession.Session, principalID string, claim idempotency.Claim, key idempotency.Key, fingerprint string) (result *mcp.CallToolResult, original, handled bool) {
 	stored, err := decodeStoredEdit(claim.Record.Response)
 	if err != nil || stored.Error != nil || stored.EditID == "" {
-		return nil, false
+		return nil, false, false
 	}
 	expected, original, reconcileErr := reconcileEditResult(session.WorkspacePath, stored.Result)
 	if reconcileErr != nil {
-		return nil, false
+		return nil, false, false
 	}
 	if expected {
 		_ = r.saveCleanEditRecord(ctx, session.ID, principalID, stored.EditID, "succeeded", stored.Result)
 		_ = r.idempotency.Complete(ctx, key, fingerprint, idempotency.StateSucceeded, claim.Record.Response, claim.Record.Metadata)
 		result, _ := r.editToolSuccess(envReq, session, stored.EditID, stored.Result, true)
-		return result, true
+		return result, original, true
 	}
 	if !original {
 		_ = r.saveCleanEditRecord(ctx, session.ID, principalID, stored.EditID, "in_doubt", stored.Result)
 		_ = r.idempotency.MarkInDoubt(ctx, key, fingerprint, claim.Record.Metadata)
 		result, _ := r.editIdempotencyInDoubt(envReq, session, claim.Record)
-		return result, true
+		return result, original, true
 	}
-	return nil, false
+	return nil, original, false
 }
