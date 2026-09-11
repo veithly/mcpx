@@ -3,7 +3,7 @@ import { Activity, ArrowDown, ChevronRight, Folder, FolderPlus, Menu, MessageSqu
 import { api, message, setCSRF } from './api';
 import type { Auth } from './model';
 import { useSidebar } from './useSidebar';
-import { isWorking, preferredSession, sessionURL, workspaceTitle } from './sidebar-model';
+import { preferredSession, sessionURL, workspaceTitle } from './sidebar-model';
 import SessionStrip from './SessionStrip';
 import NativePermissions from './NativePermissions';
 import Login, { Brand } from './Login';
@@ -89,7 +89,7 @@ function Workbench({ theme, toggleTheme, logout }: { theme: string; toggleTheme:
       {errorText && <div className="global-error" role="alert"><span>{errorText}</span><button onClick={() => { live.refresh(); void navigation.refresh(); }}><RefreshCw size={14}/>重新连接</button></div>}
       <div className="workspace-content">
         {activeWorkspace && <SessionStrip workspace={activeWorkspace} sessions={snapshot.sessions} selected={session} current={activeSession} choose={choose}/>}
-        <section className="workspace-heading"><div><span className="eyebrow">{session ? 'AGENT SESSION' : 'WORKSPACE OVERVIEW'}</span><h1>{session ? activeSession?.label || '任务会话' : workspace || '你的工作，从这里开始。'}</h1><p>{session ? activeSession?.description || session : activeWorkspace?.path || '添加一个项目，让工作有迹可循。'}</p>{session && <code className="project-binding">项目目录：{activeSession?.workspace_path || activeWorkspace?.path || '正在核对…'}</code>}</div>{(activeSession ? isWorking(activeSession) : (activeWorkspace?.working_sessions || 0)>0) && <span className="running-pill"><i className="status-dot running"/>正在执行</span>}</section>
+        {!session && <section className="workspace-heading"><div><span className="eyebrow">WORKSPACE OVERVIEW</span><h1>{workspace || '你的工作，从这里开始。'}</h1><p>{activeWorkspace?.path || '添加一个项目，让工作有迹可循。'}</p></div>{(activeWorkspace?.working_sessions || 0) > 0 && <span className="running-pill"><i className="status-dot running"/>正在执行</span>}</section>}
         <nav className="tabs" aria-label="任务视图">{[{ id: 'activity', label: '工作流', icon: <Activity size={15}/> }, { id: 'terminal', label: '终端', icon: <TerminalSquare size={15}/> }, { id: 'requests', label: '请求', icon: <MessageSquare size={15}/> }].map(item => <button key={item.id} aria-current={tab === item.id ? 'page' : undefined} className={tab === item.id ? 'active' : ''} onClick={() => setTab(item.id)}>{item.icon}{item.label}{item.id === 'requests' && !!(pending + unacknowledged) && <span className="tab-count">{pending + unacknowledged}</span>}</button>)}</nav>
         {!!pending && tab !== 'requests' && <button className="approval-banner" onClick={() => setTab('requests')}><ShieldCheck size={16}/>{pending} 个操作正在等待审批（也可以直接在 GPT 对话中确认）<ChevronRight size={16}/></button>}
         <div ref={scroller} className="content-scroll" onScroll={() => { const el = scroller.current; if (el && el.scrollHeight - el.scrollTop - el.clientHeight > 80) setFollow(false); }}>

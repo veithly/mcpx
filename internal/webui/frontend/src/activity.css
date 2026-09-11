@@ -70,18 +70,17 @@
 .empty-state p { font-size: 12px; line-height: 1.9; }
 .empty-footnote { font-size: 10px; color: var(--faint); margin-top: 25px; }
 .load-history { display: block; margin: 4px auto 22px; color: var(--muted); font-size: 11px; padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px; }
-.composer-area { flex-shrink: 0; padding-top: 13px; }
+.composer-area { flex-shrink: 0; padding-top: 9px; }
 .composer { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); box-shadow: 0 2px 9px #30332305; }
 .composer:focus-within { border-color: var(--faint); box-shadow: 0 0 0 3px var(--accent-soft); }
-.composer textarea { display: block; width: 100%; resize: vertical; height: 67px; min-height: 58px; max-height: 180px; border: none; outline: none; background: transparent; padding: 14px 15px 5px; font-size: 13px; line-height: 1.7; }
+.composer textarea { display: block; width: 100%; resize: vertical; height: 52px; min-height: 48px; max-height: 180px; border: none; outline: none; background: transparent; padding: 10px 14px 3px; font-size: 13px; line-height: 1.6; }
 .composer textarea::placeholder { color: var(--faint); }
-.composer footer { display: flex; align-items: center; justify-content: space-between; padding: 6px 9px 9px 14px; }
+.composer footer { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px 7px 12px; }
 .composer-target { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; }
 .composer footer > div { display: flex; align-items: center; gap: 9px; }
 .stop-button { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--muted); padding: 6px 7px; border-radius: 6px; }
 .stop-button:hover:not(:disabled) { color: var(--danger); background: var(--sidebar); }
 .send-button { display: grid; place-items: center; width: 29px; height: 29px; border-radius: 8px; background: var(--text); color: var(--bg); }
-.composer-hint { color: var(--faint); font-size: 10px; text-align: center; line-height: 1.6; padding: 9px 10px 0; }
 .terminal-section { padding: 22px 0; }
 .terminal-controls { display: flex; align-items: center; gap: 15px; margin-bottom: 12px; }
 .task-select { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; color: var(--muted); }

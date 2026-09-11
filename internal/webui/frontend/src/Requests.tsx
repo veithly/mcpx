@@ -21,9 +21,9 @@ export function Composer({ workspace, session, onSent }: { workspace: string; se
     } catch (cause) { setError(message(cause)); } finally { setBusy(false); }
   };
   return <div className="composer-area"><div className="composer">
-    <textarea aria-label="给 GPT 发送指令" placeholder={session ? '告诉 GPT 下一步怎么做…将在它下一次调用工具时送达。' : '给这个 Workspace 的 GPT 留一条指令…'} value={body} onChange={event => setBody(event.target.value)} maxLength={8000} onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); void send(); } }}/>
+    <textarea aria-label="给 GPT 发送指令" placeholder={session ? '告诉 GPT 下一步怎么做…' : '给这个 Workspace 的 GPT 留一条指令…'} value={body} onChange={event => setBody(event.target.value)} maxLength={8000} onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); void send(); } }}/>
     <footer><span className="composer-target"><MessageSquare size={13}/>{session ? '当前会话 · 下次工具调用时送达' : 'Workspace 级 · 下次工具调用时送达'}</span><button className="send-button" disabled={busy || !body.trim()} onClick={() => void send()} aria-label="发送指令给 GPT">{busy ? '…' : <ArrowUp size={19}/>}</button></footer>
-  </div><p className="composer-hint">你输入的就是给 GPT 的最新指示：发送后按请求 ID 排队，随它下一次工具返回直接交给它，并要求它照此调整；右侧"请求"页可以看到排队 → 已送达 → GPT 已回执。空闲中的 GPT 要等它下一次调用工具才会看到。</p>
+  </div>
   {notice && <p className="success-message" role="status">{notice}</p>}{error && <p className="form-error" role="alert">{error}</p>}</div>;
 }
 

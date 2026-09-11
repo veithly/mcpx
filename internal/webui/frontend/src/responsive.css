@@ -1,5 +1,5 @@
-@media (min-width: 1550px) { .sidebar { width: 285px; }.workspace-content { padding-top: 45px; } }
-@media (max-width: 1050px) { .sidebar { width: 235px; }.workspace-content { padding: 25px 29px 13px; }.main-header { padding: 0 24px; }.connection { display: none; }.app-tag { display: none; }.terminal-search small { max-width: 50%; } }
+@media (min-width: 1550px) { .sidebar { width: 285px; }.workspace-content { padding-top: 18px; } }
+@media (max-width: 1050px) { .sidebar { width: 235px; }.workspace-content { padding: 16px 29px 10px; }.main-header { padding: 0 24px; }.connection { display: none; }.app-tag { display: none; }.terminal-search small { max-width: 50%; } }
 @media (max-width: 760px) {
   .mobile-only { display: inline-flex; }.sidebar { position: fixed; top: 0; left: 0; bottom: 0; width: 280px; z-index: 20; transform: translateX(-100%); transition: transform .18s ease; padding-bottom: calc(12px + env(safe-area-inset-bottom)); }.sidebar.open { transform: translateX(0); }.sidebar-backdrop { position: fixed; inset: 0; background: #10151066; z-index: 19; }
   /* 头部与内容边距压缩，把纵向空间让给任务时间线 */
@@ -17,11 +17,11 @@
   /* 终端日志在手机上给更高的可视高度 */
   .terminal-output { min-height: 180px; max-height: 62dvh; }.terminal-search small { display: none; }
   /* 输入区压缩：隐藏长提示文案，避免 iOS 聚焦时自动放大 */
-  .composer-area { padding-top: 8px; padding-bottom: max(6px, env(safe-area-inset-bottom)); }.composer-hint { display: none; }
+  .composer-area { padding-top: 8px; padding-bottom: max(6px, env(safe-area-inset-bottom)); }
   .composer textarea { height: 42px; min-height: 42px; padding: 10px 13px 3px; font-size: 16px; }.composer footer { padding: 5px 7px 7px 12px; }
   .jump-latest { bottom: 106px; }
   .empty-state { padding: 53px 0 40px; }.empty-state h2 { font-size: 16px; }
   .login-layout { grid-template-columns: 1fr; }.login-story { padding: 25px 28px; border-right: 0; border-bottom: 1px solid var(--border); }.login-editorial { padding: 31px 0 14px; }.login-editorial h1 { font-size: 41px; letter-spacing: -1.8px; margin: 14px 0 17px; }.login-editorial > p { font-size: 13px; }.login-capabilities, .login-story > footer { display: none; }.login-form-panel { padding: 40px 28px 70px; }.login-form { max-width: 420px; }.login-lock { display: none; }.login-form h2 { font-size: 21px; }.login-bottom { bottom: 21px; }.modal { padding: 20px; }
 }
-@media (max-height: 650px) and (min-width: 761px) { .workspace-content { padding-top: 18px; }.workspace-heading { padding-bottom: 12px; }.workspace-heading p, .project-binding { display: none; }.composer textarea { height: 42px; min-height: 42px; }.composer-hint { display: none; }.empty-state { padding: 35px 0; }.login-editorial { padding: 30px 0; }.login-editorial h1 { font-size: 46px; }.login-capabilities { gap: 13px; margin-top: 25px; } }
+@media (max-height: 650px) and (min-width: 761px) { .workspace-content { padding-top: 12px; }.workspace-heading { padding-bottom: 12px; }.workspace-heading p, .project-binding { display: none; }.composer textarea { height: 42px; min-height: 42px; }.empty-state { padding: 35px 0; }.login-editorial { padding: 30px 0; }.login-editorial h1 { font-size: 46px; }.login-capabilities { gap: 13px; margin-top: 25px; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }

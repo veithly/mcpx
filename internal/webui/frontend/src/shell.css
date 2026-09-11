@@ -30,7 +30,7 @@
 .sidebar-footer > div { display: flex; align-items: center; margin-top: 8px; padding-left: 10px; }
 .runtime-version { font-size: 10px; color: var(--muted); flex: 1; }
 .workspace-main { display: flex; flex: 1; min-width: 0; flex-direction: column; }
-.main-header { height: 64px; padding: 0 30px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.main-header { height: 52px; padding: 0 30px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .breadcrumb { display: flex; gap: 10px; align-items: center; min-width: 0; color: var(--muted); font-size: 12px; }
 .breadcrumb strong { font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .header-status { display: flex; align-items: center; gap: 18px; flex-shrink: 0; }
@@ -40,8 +40,8 @@
 .connection.offline i, .connection.reconnecting i { background: #cb9452; }
 .access-badge { display: flex; gap: 6px; align-items: center; border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 10px; }
 .access-badge.full_access { color: var(--warning); background: var(--warning-bg); }
-.workspace-content { width: 100%; max-width: 1080px; align-self: center; padding: 31px 52px 15px; display: flex; flex-direction: column; flex: 1; min-height: 0; position: relative; }
-.workspace-heading { display: flex; gap: 15px; justify-content: space-between; align-items: center; padding-bottom: 22px; }
+.workspace-content { width: 100%; max-width: 1080px; align-self: center; padding: 18px 52px 10px; display: flex; flex-direction: column; flex: 1; min-height: 0; position: relative; }
+.workspace-heading { display: flex; gap: 15px; justify-content: space-between; align-items: center; padding-bottom: 16px; }
 .workspace-heading > div { min-width: 0; }
 .workspace-heading h1 { font-size: 24px; font-weight: 600; letter-spacing: -.7px; margin: 5px 0; line-height: 1.4; overflow-wrap: anywhere; }
 .workspace-heading p { font-size: 12px; color: var(--muted); line-height: 1.7; max-height: 3.4em; overflow: hidden; overflow-wrap: anywhere; }
@@ -55,5 +55,5 @@
 .global-error button { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 .approval-banner { display: flex; gap: 8px; align-items: center; width: 100%; background: var(--warning-bg); color: var(--warning); padding: 10px 12px; border-radius: 7px; margin: 15px 0 0; text-align: left; font-size: 11px; }
 .approval-banner svg:last-child { margin-left: auto; }
-.jump-latest { align-self: center; display: flex; gap: 5px; align-items: center; position: absolute; bottom: 195px; border: 1px solid var(--border); background: var(--panel); border-radius: 20px; padding: 6px 12px; box-shadow: var(--shadow); font-size: 10px; }
+.jump-latest { align-self: center; display: flex; gap: 5px; align-items: center; position: absolute; bottom: 132px; border: 1px solid var(--border); background: var(--panel); border-radius: 20px; padding: 6px 12px; box-shadow: var(--shadow); font-size: 10px; }
 .welcome-add { display: flex; margin: 0 auto 35px; }
