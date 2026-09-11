@@ -382,3 +382,32 @@ func TestActionSchemasExposeBranchPropertiesAtRoot(t *testing.T) {
 		}
 	}
 }
+
+// TestReadOnlyAnnotationsPinTheClientVisibleSet pins which tools advertise
+// readOnlyHint=true. Web connectors in read-only/regular mode expose only
+// read-only-annotated tools to the model, so a client tool list missing
+// execute/edit is client-side filtering — not a Runtime catalog gap. The
+// catalog itself must stay complete (TestPublicCatalogIsExactlyTheCleanCoreContract).
+func TestReadOnlyAnnotationsPinTheClientVisibleSet(t *testing.T) {
+	runtime := &Runtime{}
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
+	runtime.registerTools(protocol)
+
+	readOnly := map[string]bool{
+		"workspace": true, "read": true, "observe": true,
+		"runtime_read": true, "environment_read": true, "screenshot_capture": true,
+	}
+	for name, tool := range runtime.listedToolMap() {
+		if tool.Annotations == nil {
+			t.Fatalf("%s must declare annotations", name)
+		}
+		if tool.Annotations.ReadOnlyHint != readOnly[name] {
+			t.Fatalf("%s readOnlyHint=%v, want %v", name, tool.Annotations.ReadOnlyHint, readOnly[name])
+		}
+	}
+	for _, name := range []string{"execute", "edit"} {
+		if tool := runtime.listedToolMap()[name]; tool.Annotations.ReadOnlyHint {
+			t.Fatalf("%s must stay mutating; marking it read-only would bypass client-side safety filtering", name)
+		}
+	}
+}

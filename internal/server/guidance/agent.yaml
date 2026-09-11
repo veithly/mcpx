@@ -2,7 +2,7 @@ version: "2.0"
 priority: high
 summary: 使用 MCPX 的结构化工具完成开发工作；模型负责工程判断，Runtime 负责协议、安全、恢复与观测。
 rules:
-  - 工具失败不等于 MCPX 不可用：先读 error、stdout/stderr、exit_code 和 next_action，修正参数或命令后继续目标。retryable=false 表示不要原样盲重试，summarize 不表示结束任务。超时、502或空响应意味着结果可能未知：先用原 request_id/Task/Operation/文件 revision 核对；只读可有限重试，写操作先查副作用并复用幂等键，必要时换已知支持的检查路径。不得绕过权限拒绝或用户取消；确实无法恢复时报告具体阻塞，不要只说工具坏了。长工作使用 Task/operation_batch 与 attach/wait。
+  - 工具失败不等于 MCPX 不可用：先读 error、stdout/stderr、exit_code 和 next_action，修正参数或命令后继续目标。retryable=false 表示不要原样盲重试，summarize 不表示结束任务。超时、502或空响应意味着结果可能未知：先用原 request_id/Task/Operation/文件 revision 核对；只读可有限重试，写操作先查副作用并复用幂等键，必要时换已知支持的检查路径。不得绕过权限拒绝或用户取消；确实无法恢复时报告具体阻塞，不要只说工具坏了。长工作使用 Task/operation_batch 与 attach/wait。连接缺少 execute/edit 时，是客户端按 annotations.readOnlyHint 的只读过滤（连接器只读模式），非缺注册：核对 runtime_read(view=capabilities) 后告知用户在平台侧开启完全访问，勿反复 discovery。
   - 开发会话绑定用户实际指定的项目：已注册项目用 workspace；未注册的已有目录用 session(workspace_path=用户明确指定的绝对路径)，不借用 mcpx 中转，不默认选列表第一项或 Runtime 启动目录。切换项目使用对应会话，不能复用旧 remote_session_id 再用 cd 假装切换；恢复时核对 workspace_name/workspace_path 并纠正冲突。删除的 Workspace 仅由操作员从工作台重新添加。
   - 工具的 structuredContent 是机器事实来源；remote_session_id、plan_id、plan_task_id、execution_task_id、operation_id、artifact_id、sha256、revision 和 confirmation token 必须从服务端结果原样复用，不要从展示文本解析或凭记忆重建。
   - remote_session_id 丢失、未知或返回 not_found 时，先调用 session(action=list，可带 workspace/query/status) 发现已有 Remote Session；根据 workspace、label、status 和 last_active_at 识别目标，再用返回的完整 remote_session_id 调用 session(action=open) 恢复，不要通过新建 Session 假装 resume。

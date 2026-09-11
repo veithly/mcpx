@@ -836,3 +836,30 @@ tail -f ~/Library/Logs/frpc.log
 ```
 
 MCPX 继续按项目原生方式启动、升级和管理，与 Caddy/frp 生命周期解耦。
+
+## 20. 部署重启语义
+
+launchd / systemd 在每次部署重启时向 MCPX 发送 SIGTERM，进程按以下顺序收尾：
+
+1. **先关闭 console SSE broker**：所有终端观测页面的事件流立即返回，不再空耗排水窗口。
+2. **排水在途工具调用（默认 50s，`toolResponseTimeout + 5s`）**：`http.Server.Shutdown` 等待
+   已接受的调用把同步响应（45s 预算）发回客户端，再给 detached worker 一段落库窗口。
+3. **释放持久资源**：等待在途重放结果写入 SQLite（短有界等待），然后关闭任务管理器与状态库。
+   超过宽限期的 worker 由进程退出兜底（worker 自身另有 90s 硬上限）。
+
+对宿主管护的建议：
+
+- **launchd 建议配置 `ExitTimeOut ≥ 60s`**（默认 20s 会提前 SIGKILL，令排水失效），例如：
+
+  ```xml
+  <key>ExitTimeOut</key>
+  <integer>60</integer>
+  ```
+
+- systemd 用户服务无需额外配置，默认 `TimeoutStopSec` 即可容纳 50s 排水；
+  如全局改小过，请为本服务设 `TimeoutStopSec=60`。
+
+**重放缓存跨重启**：已完成的工具调用结果（10 分钟 TTL、512 条上限）持久化在状态库
+`tool_replays` 表中。SIGTERM 时没来得及送出的结果（>45s 的调用）在重启后仍可回放：
+客户端用相同参数重试会命中回放并标记"服务重启前已完成"，不会重复执行副作用；
+需要真实重跑时把参数 `rerun` 设为 `true`。
