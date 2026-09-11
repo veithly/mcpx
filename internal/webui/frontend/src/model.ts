@@ -70,7 +70,7 @@ export function timelineEntries(events: Activity[]): Activity[] {
   const cardCalls = new Set<string>();
   for (const event of events) {
     if (event.call_id && (event.type === 'tool.started' || event.type === 'tool.completed')) cardCalls.add(event.call_id);
-    else if (event.type === 'command.output' && event.call_id) appendOutput(outputs, event.call_id, event);
+    else if (event.type === 'command.output' && event.call_id && cardCalls.has(event.call_id)) appendOutput(outputs, event.call_id, event);
     else if (event.type === 'file.changed' && event.call_id) {
       const { diffs, paths } = diffTextsOf(event);
       const existing = changes.get(event.call_id) ?? { diffs: [], paths: [] };
@@ -80,12 +80,30 @@ export function timelineEntries(events: Activity[]): Activity[] {
     }
   }
   const byCall = new Map<string, number>(); const out: Activity[] = [];
+  let orphanTask = ''; let orphanRow = -1;
   for (const event of events) {
     if (event.type === 'command.output') {
-      // Chunks whose parent card is missing (page boundary) still render standalone.
-      if (!event.call_id || !cardCalls.has(event.call_id)) out.push({ ...event, outputs: [ { stream: event.stream || 'stdout', text: typeof (event.output as { text?: unknown } | null)?.text === 'string' ? (event.output as { text: string }).text : '' } ] });
+      if (event.call_id && cardCalls.has(event.call_id)) continue;
+      // Chunks whose parent card is outside the loaded window group into one
+      // row per contiguous run so a chatty long task does not flood the
+      // timeline with one row per chunk.
+      const key = event.execution_task_id || event.call_id || '';
+      const text = typeof (event.output as { text?: unknown } | null)?.text === 'string' ? (event.output as { text: string }).text : '';
+      if (key && key === orphanTask && orphanRow >= 0) {
+        const row = out[orphanRow];
+        const rowOutputs = [...(row.outputs ?? [])];
+        const last = rowOutputs[rowOutputs.length - 1];
+        if (last && last.stream === (event.stream || 'stdout')) rowOutputs[rowOutputs.length - 1] = { ...last, text: last.text + text };
+        else rowOutputs.push({ stream: event.stream || 'stdout', text });
+        out[orphanRow] = { ...row, outputs: rowOutputs };
+        continue;
+      }
+      orphanTask = key;
+      orphanRow = out.length;
+      out.push({ ...event, outputs: [{ stream: event.stream || 'stdout', text }] });
       continue;
     }
+    orphanTask = ''; orphanRow = -1;
     if (event.type === 'file.changed') {
       if (!event.call_id || !cardCalls.has(event.call_id)) out.push({ ...event, ...changes.get(event.call_id ?? '') });
       continue;

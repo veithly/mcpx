@@ -27,6 +27,24 @@ test('orphan command output still renders after the parent card', () => {
   const entries = timelineEntries([event(1, { type: 'tool.completed', call_id: 'a', status: 'succeeded' }), event(2, { type: 'command.output', call_id: 'late', stream: 'stdout', output: { text: 'tail' } })]);
   assert.equal(entries.length, 2); assert.equal(entries[1].outputs[0].text, 'tail');
 });
+test('consecutive orphan chunks of one task collapse into a single row', () => {
+  const chunks = [];
+  for (let index = 0; index < 20; index++) chunks.push(event(index + 2, { type: 'command.output', call_id: 'req-1', execution_task_id: 'task-1', stream: 'stderr', output: { text: `line${index}\n` } }));
+  const entries = timelineEntries([event(1, { type: 'tool.completed', call_id: 'a', status: 'succeeded' }), ...chunks]);
+  assert.equal(entries.length, 2);
+  assert.equal(entries[1].execution_task_id, 'task-1');
+  assert.equal(entries[1].outputs[0].text, Array.from({ length: 20 }, (_, index) => `line${index}\n`).join(''));
+});
+test('a card between orphan runs splits them into separate rows', () => {
+  const entries = timelineEntries([
+    event(1, { type: 'command.output', call_id: 'r1', execution_task_id: 'task-1', stream: 'stdout', output: { text: 'a' } }),
+    event(2, { type: 'tool.completed', call_id: 'b', status: 'succeeded' }),
+    event(3, { type: 'command.output', call_id: 'r1', execution_task_id: 'task-1', stream: 'stdout', output: { text: 'c' } }),
+  ]);
+  assert.equal(entries.length, 3);
+  assert.equal(entries[0].outputs[0].text, 'a');
+  assert.equal(entries[2].outputs[0].text, 'c');
+});
 test('file change diffs attach to the edit that produced them', () => {
   const entries = timelineEntries([
     event(1, { type: 'tool.started', call_id: 'e', tool: 'edit' }),

@@ -22,9 +22,11 @@ import (
 
 const observationSummaryMaxBytes = 8 << 10
 
-// observationWriteTimeout bounds SQLite append only. Keep short and fail soft:
-// observation is best-effort and must not sit behind multi-second retention work.
-const observationWriteTimeout = 3 * time.Second
+// observationWriteTimeout bounds SQLite append only. It must stay above the
+// store busy_timeout(1500ms) so the failure mode under lock contention is
+// "waited, then failed" rather than an immediate deadline while SQLite was
+// still willing to grant the lock. Observation is best-effort: fail soft.
+const observationWriteTimeout = 5 * time.Second
 
 type observationTaskStreamKey struct {
 	taskID          string
@@ -37,13 +39,33 @@ type observationTaskOutputKey struct {
 	remoteSessionID string
 }
 
+type observationTaskOutputPending struct {
+	text   strings.Builder
+	bytes  int
+	offset int64
+}
+
 type observationTaskOutputState struct {
 	usedBytes    int64
 	truncated    bool
+	events       int
+	lastEmit     time.Time
 	finalStreams map[string]struct{}
+	pending      map[string]*observationTaskOutputPending
 }
 
 const observationTaskOutputMarker = "[output truncated; read task logs for remaining output]"
+
+// Task output events exist for live progress; the durable per-task log files
+// remain the complete record. A chatty long-running process would otherwise
+// write one observation row per pipe write (a 12-hour poll loop produced
+// 50k events and hundreds of MB of SQLite), so raw chunks coalesce into one
+// event per flush window and stop after a bounded event count per task.
+const (
+	observationTaskOutputFlushInterval = 2 * time.Second
+	observationTaskOutputFlushBytes    = 16 << 10
+	defaultTaskOutputEventLimit        = 300
+)
 
 // observationBridge is the single write boundary for the workspace observer.
 // Store.Append always happens before Broker.Publish so a live observer can
@@ -51,15 +73,16 @@ const observationTaskOutputMarker = "[output truncated; read task logs for remai
 // Tool lifecycle and task output events are enqueued on async so tools/call and
 // the command pipe copy path are not blocked by SQLite latency.
 type observationBridge struct {
-	store              *observation.Store
-	broker             *observation.Broker
-	async              *observation.AsyncRecorder
-	resolve            func(context.Context, envelope.Request) (string, string)
-	recordMu           sync.Mutex
-	outputStateMu      sync.Mutex
-	outputSanitizer    map[observationTaskStreamKey]*observation.TextStreamSanitizer
-	outputBudget       map[observationTaskOutputKey]*observationTaskOutputState
-	maxTaskOutputBytes int64
+	store               *observation.Store
+	broker              *observation.Broker
+	async               *observation.AsyncRecorder
+	resolve             func(context.Context, envelope.Request) (string, string)
+	recordMu            sync.Mutex
+	outputStateMu       sync.Mutex
+	outputSanitizer     map[observationTaskStreamKey]*observation.TextStreamSanitizer
+	outputBudget        map[observationTaskOutputKey]*observationTaskOutputState
+	maxTaskOutputBytes  int64
+	maxTaskOutputEvents int
 }
 
 func (b *observationBridge) Record(ctx context.Context, event observation.Event) error {
@@ -276,9 +299,9 @@ func (b *observationBridge) RecordToolResult(ctx context.Context, name string, r
 	if err != nil {
 		return fmt.Errorf("marshal tool result: %w", err)
 	}
-	if len(raw) > observation.MaxToolResultBytes {
-		return fmt.Errorf("tool result exceeds %d bytes", observation.MaxToolResultBytes)
-	}
+	// Results beyond MaxToolResultBytes are truncated by SaveToolResult into a
+	// valid-JSON preview with truncated=true instead of being rejected: this
+	// row is the only request-addressable recovery copy after a disconnect.
 	facts := toolObservationFacts(name, args, result, timing)
 	status := "succeeded"
 	if result.IsError {
@@ -468,12 +491,92 @@ func (r *Runtime) observeTaskOutput(chunk terminal.OutputChunk) {
 	if r == nil || r.observation == nil || (len(chunk.Data) == 0 && !chunk.Final) {
 		return
 	}
-	text, sanitizedTruncated := r.observation.sanitizeTaskOutput(chunk)
-	encoded, budgetTruncated, keep := r.observation.prepareTaskOutput(chunk, text)
-	if !keep {
-		return
+	for _, event := range r.observation.collectTaskOutputEvents(chunk) {
+		_ = r.observation.enqueueOrRecord(context.Background(), event)
 	}
-	_ = r.observation.enqueueOrRecord(context.Background(), observation.Event{
+}
+
+// collectTaskOutputEvents buffers raw stream chunks per task and stream and
+// returns the observation events to persist. It must be called once per chunk
+// in stream order and returns at most one event per call.
+func (b *observationBridge) collectTaskOutputEvents(chunk terminal.OutputChunk) []observation.Event {
+	key := observationTaskOutputKey{taskID: chunk.TaskID, remoteSessionID: chunk.RemoteSessionID}
+	b.outputStateMu.Lock()
+	defer b.outputStateMu.Unlock()
+	if b.outputBudget == nil {
+		b.outputBudget = make(map[observationTaskOutputKey]*observationTaskOutputState)
+	}
+	state := b.outputBudget[key]
+	if state == nil {
+		state = &observationTaskOutputState{finalStreams: make(map[string]struct{}), pending: make(map[string]*observationTaskOutputPending)}
+		b.outputBudget[key] = state
+	}
+	if chunk.Final {
+		state.finalStreams[chunk.Stream] = struct{}{}
+	}
+	cleanup := func() {
+		if len(state.finalStreams) >= 2 {
+			delete(b.outputBudget, key)
+		}
+	}
+
+	if chunk.Final {
+		events := b.flushTaskOutputLocked(state, key, chunk, true)
+		cleanup()
+		return events
+	}
+	if state.truncated {
+		cleanup()
+		return nil
+	}
+	if state.events >= b.taskOutputEventLimit() {
+		// Event budget exhausted. Mark truncation so the last emitted event
+		// carries the flag and later chunks are dropped; task log files keep
+		// the complete output for task_manage/observe logs.
+		state.truncated = true
+		cleanup()
+		return nil
+	}
+	pending := state.pending[chunk.Stream]
+	if pending == nil {
+		pending = &observationTaskOutputPending{offset: chunk.Offset}
+		state.pending[chunk.Stream] = pending
+	}
+	pending.text.Write(chunk.Data)
+	pending.bytes += len(chunk.Data)
+	if pending.bytes < observationTaskOutputFlushBytes && time.Since(state.lastEmit) < observationTaskOutputFlushInterval {
+		return nil
+	}
+	return b.flushTaskOutputLocked(state, key, chunk, false)
+}
+
+// flushTaskOutputLocked sanitizes the buffered stream text and emits it as one
+// observation event. Callers hold outputStateMu.
+func (b *observationBridge) flushTaskOutputLocked(state *observationTaskOutputState, key observationTaskOutputKey, chunk terminal.OutputChunk, final bool) []observation.Event {
+	pending := state.pending[chunk.Stream]
+	delete(state.pending, chunk.Stream)
+	text, byteCount, offset := "", 0, chunk.Offset
+	if pending != nil {
+		text, byteCount, offset = pending.text.String(), pending.bytes, pending.offset
+	}
+	sanitized, sanitizedTruncated := b.sanitizeTaskStreamLocked(observationTaskStreamKey{
+		taskID: key.taskID, remoteSessionID: key.remoteSessionID, stream: chunk.Stream,
+	}, text, final)
+	if sanitized == "" {
+		return nil
+	}
+	encoded, budgetTruncated, keep := b.budgetTaskOutputLocked(state, sanitized, byteCount)
+	if !keep {
+		return nil
+	}
+	state.events++
+	state.lastEmit = time.Now()
+	truncated := sanitizedTruncated || budgetTruncated
+	if state.events >= b.taskOutputEventLimit() {
+		state.truncated = true
+		truncated = true
+	}
+	return []observation.Event{{
 		Workspace:        chunk.WorkspaceName,
 		RemoteSessionID:  chunk.RemoteSessionID,
 		RequestID:        chunk.RequestID,
@@ -489,32 +592,36 @@ func (r *Runtime) observeTaskOutput(chunk terminal.OutputChunk) {
 		Summary:          fmt.Sprintf("task %s %s output", chunk.TaskID, chunk.Stream),
 		ResourceURI:      fmt.Sprintf("mcpx://remote-sessions/%s/tasks/%s/logs", chunk.RemoteSessionID, chunk.TaskID),
 		Stream:           chunk.Stream,
-		Offset:           chunk.Offset,
-		Truncated:        sanitizedTruncated || budgetTruncated,
-	})
+		Offset:           offset,
+		Truncated:        truncated,
+	}}
 }
 
-func (b *observationBridge) sanitizeTaskOutput(chunk terminal.OutputChunk) (string, bool) {
-	key := observationTaskStreamKey{
-		taskID:          chunk.TaskID,
-		remoteSessionID: chunk.RemoteSessionID,
-		stream:          chunk.Stream,
+// budgetTaskOutputLocked applies the cumulative byte budget for a task. It
+// returns keep=false once the task exhausted its budget; state is marked
+// truncated so later output is dropped instead of retried. Callers hold
+// outputStateMu.
+func (b *observationBridge) budgetTaskOutputLocked(state *observationTaskOutputState, sanitized string, byteCount int) (encoded []byte, truncated bool, keep bool) {
+	if state.truncated {
+		return nil, false, false
 	}
-	b.outputStateMu.Lock()
-	defer b.outputStateMu.Unlock()
-	if b.outputSanitizer == nil {
-		b.outputSanitizer = make(map[observationTaskStreamKey]*observation.TextStreamSanitizer)
+	remaining := b.taskOutputLimit() - state.usedBytes
+	if remaining <= 0 {
+		state.truncated = true
+		return nil, true, false
 	}
-	sanitizer := b.outputSanitizer[key]
-	if sanitizer == nil {
-		sanitizer = &observation.TextStreamSanitizer{}
-		b.outputSanitizer[key] = sanitizer
+	encoded = marshalTaskOutput(sanitized, byteCount)
+	if int64(len(encoded)) <= remaining {
+		state.usedBytes += int64(len(encoded))
+		return encoded, false, true
 	}
-	text, truncated := sanitizer.SanitizeChunk(string(chunk.Data), chunk.Final, observation.MaxEventBytes)
-	if chunk.Final {
-		delete(b.outputSanitizer, key)
+	encoded, _ = fitTaskOutputPayload(sanitized, byteCount, remaining)
+	state.truncated = true
+	if len(encoded) == 0 {
+		return nil, true, false
 	}
-	return text, truncated
+	state.usedBytes += int64(len(encoded))
+	return encoded, true, true
 }
 
 func (b *observationBridge) taskOutputLimit() int64 {
@@ -524,63 +631,30 @@ func (b *observationBridge) taskOutputLimit() int64 {
 	return terminal.MaxPersistedTaskLogBytes
 }
 
-// prepareTaskOutput applies the cumulative observation budget before an event
-// enters the async recorder. The budget is shared by stdout and stderr for a
-// task, so a noisy command cannot multiply its allowance by stream count.
-func (b *observationBridge) prepareTaskOutput(chunk terminal.OutputChunk, text string) ([]byte, bool, bool) {
-	if b == nil {
-		return nil, false, false
+func (b *observationBridge) taskOutputEventLimit() int {
+	if b != nil && b.maxTaskOutputEvents > 0 {
+		return b.maxTaskOutputEvents
 	}
-	key := observationTaskOutputKey{taskID: chunk.TaskID, remoteSessionID: chunk.RemoteSessionID}
-	b.outputStateMu.Lock()
-	defer b.outputStateMu.Unlock()
-	if b.outputBudget == nil {
-		b.outputBudget = make(map[observationTaskOutputKey]*observationTaskOutputState)
-	}
-	state := b.outputBudget[key]
-	if state == nil {
-		state = &observationTaskOutputState{finalStreams: make(map[string]struct{})}
-		b.outputBudget[key] = state
-	}
-	if chunk.Final {
-		state.finalStreams[chunk.Stream] = struct{}{}
-	}
-	cleanup := func() {
-		if len(state.finalStreams) >= 2 {
-			delete(b.outputBudget, key)
-		}
-	}
-	if state.truncated {
-		cleanup()
-		return nil, false, false
-	}
-	if len(chunk.Data) == 0 && text == "" {
-		cleanup()
-		return nil, false, false
-	}
+	return defaultTaskOutputEventLimit
+}
 
-	remaining := b.taskOutputLimit() - state.usedBytes
-	if remaining <= 0 {
-		state.truncated = true
-		cleanup()
-		return nil, true, false
+// sanitizeTaskStreamLocked runs the per-stream credential sanitizer. final
+// must be true for the stream's final flush so incomplete state is released.
+// Callers hold outputStateMu.
+func (b *observationBridge) sanitizeTaskStreamLocked(key observationTaskStreamKey, text string, final bool) (string, bool) {
+	if b.outputSanitizer == nil {
+		b.outputSanitizer = make(map[observationTaskStreamKey]*observation.TextStreamSanitizer)
 	}
-	encoded := marshalTaskOutput(text, len(chunk.Data))
-	if int64(len(encoded)) <= remaining {
-		state.usedBytes += int64(len(encoded))
-		cleanup()
-		return encoded, false, true
+	sanitizer := b.outputSanitizer[key]
+	if sanitizer == nil {
+		sanitizer = &observation.TextStreamSanitizer{}
+		b.outputSanitizer[key] = sanitizer
 	}
-
-	encoded, _ = fitTaskOutputPayload(text, len(chunk.Data), remaining)
-	state.truncated = true
-	if len(encoded) == 0 {
-		cleanup()
-		return nil, true, false
+	sanitized, truncated := sanitizer.SanitizeChunk(text, final, observation.MaxEventBytes)
+	if final {
+		delete(b.outputSanitizer, key)
 	}
-	state.usedBytes += int64(len(encoded))
-	cleanup()
-	return encoded, true, true
+	return sanitized, truncated
 }
 
 func marshalTaskOutput(text string, byteCount int) []byte {
