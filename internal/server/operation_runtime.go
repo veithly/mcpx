@@ -87,10 +87,33 @@ func (r *Runtime) executeOperationStep(ctx context.Context, input operation.Exec
 	request := mcpresult.Request(arguments)
 	childCtx := r.operationChildContext(ctx, input)
 	result, callErr := handler(childCtx, request)
+	if ctx.Err() != nil {
+		// The step was cancelled or hit its deadline while the tool ran. Stop
+		// any terminal Task the step already started so the process cannot
+		// outlive the step; Kill is a no-op for tasks that already finished.
+		r.killOperationTask(input, result)
+	}
 	if callErr == nil && input.Tool == "execute" {
 		result, callErr = r.waitForOperationTask(childCtx, input, result)
 	}
 	return operationResult(result, callErr)
+}
+
+// killOperationTask stops the terminal Task started by this step, if any, so
+// cancelled or timed-out operation steps do not leave shell processes running
+// in the background (occupying task slots, writing logs, producing side
+// effects). Kill is idempotent, so double calls are harmless.
+func (r *Runtime) killOperationTask(input operation.ExecuteInput, result *mcp.CallToolResult) {
+	if r.tasks == nil || result == nil {
+		return
+	}
+	taskID := resultTaskID(result)
+	if taskID == "" {
+		return
+	}
+	if task, err := r.tasks.Get(input.RemoteSessionID, taskID); err == nil {
+		_ = task.Kill()
+	}
 }
 
 func (r *Runtime) waitForOperationTask(ctx context.Context, input operation.ExecuteInput, result *mcp.CallToolResult) (*mcp.CallToolResult, error) {
@@ -107,6 +130,10 @@ func (r *Runtime) waitForOperationTask(ctx context.Context, input operation.Exec
 	}
 	if !task.Wait(ctx) {
 		if ctx.Err() != nil {
+			// The operation step was cancelled or exceeded its deadline. Kill
+			// the underlying task so the process stops occupying a task slot,
+			// writing logs, or producing side effects after the step is gone.
+			_ = task.Kill()
 			return nil, ctx.Err()
 		}
 		return nil, fmt.Errorf("task %s did not reach a terminal state", taskID)
@@ -207,9 +234,90 @@ func operationResult(result *mcp.CallToolResult, callErr error) operation.Execut
 		output.ConfirmationToken = token
 	}
 	if output.Err == nil && status == "failed" {
-		output.Err = errors.New("public tool execution failed")
+		output.Err = publicToolFailure(result)
 	}
 	return output
+}
+
+// publicToolFailure rebuilds a step error from the failed tool's response
+// envelope so the machine-readable code (PROCESS_EXIT, COMMAND_NOT_FOUND, ...)
+// and its message survive into the durable step error instead of collapsing
+// into a generic failure string that forces an extra result query.
+func publicToolFailure(result *mcp.CallToolResult) error {
+	code, message := resultErrorBody(result)
+	switch {
+	case code != "" && message != "":
+		return fmt.Errorf("%s: %s", code, message)
+	case code != "":
+		return fmt.Errorf("%s: public tool execution failed", code)
+	case message != "":
+		return errors.New(message)
+	default:
+		return errors.New("public tool execution failed")
+	}
+}
+
+// resultErrorBody extracts the normalized envelope error body {code,message}
+// from a failed tool result. It reads structuredContent first, then the JSON
+// envelope carried in text content, mirroring findStatusValue's traversal.
+func resultErrorBody(result *mcp.CallToolResult) (string, string) {
+	if result == nil {
+		return "", ""
+	}
+	if sc, ok := result.StructuredContent.(map[string]any); ok && sc != nil {
+		if code, message := findErrorBody(sc, 0); code != "" || message != "" {
+			return code, message
+		}
+	}
+	for _, content := range result.Content {
+		textContent, ok := content.(*mcp.TextContent)
+		if !ok {
+			continue
+		}
+		var value any
+		if json.Unmarshal([]byte(textContent.Text), &value) != nil {
+			continue
+		}
+		if code, message := findErrorBody(value, 0); code != "" || message != "" {
+			return code, message
+		}
+	}
+	return "", ""
+}
+
+// findErrorBody locates the envelope's error object and returns its code and
+// message. The wire shape is {status, data, meta, error:{code,message,...}},
+// possibly nested under {mcpx:{result:{...}}}.
+func findErrorBody(value any, depth int) (string, string) {
+	if depth > 8 {
+		return "", ""
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		if raw, exists := typed["error"]; exists {
+			if body, ok := raw.(map[string]any); ok {
+				code, _ := body["code"].(string)
+				message, _ := body["message"].(string)
+				if code != "" || message != "" {
+					return code, message
+				}
+			}
+		}
+		for _, key := range []string{"mcpx", "result", "data"} {
+			if nested, exists := typed[key]; exists {
+				if code, message := findErrorBody(nested, depth+1); code != "" || message != "" {
+					return code, message
+				}
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if code, message := findErrorBody(nested, depth+1); code != "" || message != "" {
+				return code, message
+			}
+		}
+	}
+	return "", ""
 }
 
 func operationResultStatus(result *mcp.CallToolResult) string {

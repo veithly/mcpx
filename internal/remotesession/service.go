@@ -28,6 +28,18 @@ var (
 	ErrInvalidInput = errors.New("invalid remote session request")
 )
 
+// VersionConflictError reports an optimistic-concurrency failure and carries
+// the latest known version so a client can retry without an extra read.
+type VersionConflictError struct {
+	CurrentVersion int
+}
+
+func (e *VersionConflictError) Error() string {
+	return fmt.Sprintf("%v: current version is %d; re-read the session (or retry the update with version %d)", ErrConflict, e.CurrentVersion, e.CurrentVersion)
+}
+
+func (e *VersionConflictError) Unwrap() error { return ErrConflict }
+
 type Service struct {
 	db         *sql.DB
 	now        func() time.Time
@@ -348,6 +360,11 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, sessionI
 	}
 	rows, _ := res.RowsAffected()
 	if rows == 0 {
+		// Re-read so the error carries the latest version for an informed
+		// retry instead of a bare conflict string.
+		if fresh, getErr := s.Get(ctx, principal, sessionID); getErr == nil {
+			return Session{}, &VersionConflictError{CurrentVersion: fresh.Version}
+		}
 		return Session{}, ErrConflict
 	}
 	_ = s.AddEvent(ctx, principal, Event{RemoteSessionID: sessionID, Type: "remote_session.updated", Summary: label, CreatedAt: now})
@@ -524,13 +541,36 @@ func (s *Service) Events(ctx context.Context, principal auth.Principal, sessionI
 	return events, rows.Err()
 }
 
+// SetEnvironmentSnapshot binds the latest environment snapshot under the same
+// optimistic-concurrency protocol as Update: the version read here must still
+// be current at write time. A blind version bump would clobber a concurrent
+// writer's transition and turn that writer's next update into a false conflict.
 func (s *Service) SetEnvironmentSnapshot(ctx context.Context, principal auth.Principal, sessionID, snapshotID string) error {
-	if _, err := s.Get(ctx, principal, sessionID); err != nil {
+	current, err := s.Get(ctx, principal, sessionID)
+	if err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE remote_sessions SET environment_snapshot_id = ?, version = version + 1,
-        last_active_at = ? WHERE id = ?`, snapshotID, s.now().UTC().UnixMilli(), sessionID)
-	return err
+	return s.setEnvironmentSnapshotVersion(ctx, principal, sessionID, snapshotID, current.Version)
+}
+
+// setEnvironmentSnapshotVersion performs the version-checked snapshot binding.
+// A stale expectedVersion yields VersionConflictError carrying the current
+// version so the caller can retry with one extra read at most.
+func (s *Service) setEnvironmentSnapshotVersion(ctx context.Context, principal auth.Principal, sessionID, snapshotID string, expectedVersion int) error {
+	now := s.now().UTC()
+	res, err := s.db.ExecContext(ctx, `UPDATE remote_sessions SET environment_snapshot_id = ?, version = version + 1,
+        last_active_at = ? WHERE id = ? AND version = ?`, snapshotID, now.UnixMilli(), sessionID, expectedVersion)
+	if err != nil {
+		return err
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		if fresh, getErr := s.Get(ctx, principal, sessionID); getErr == nil {
+			return &VersionConflictError{CurrentVersion: fresh.Version}
+		}
+		return ErrConflict
+	}
+	return nil
 }
 
 func upsertPrincipal(ctx context.Context, tx *sql.Tx, principal auth.Principal, now time.Time) error {

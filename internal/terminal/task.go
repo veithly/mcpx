@@ -79,38 +79,162 @@ type Task struct {
 	FinishedAt      *time.Time
 	LimitReason     string
 
-	mu            sync.Mutex
-	logBuf        bytes.Buffer
-	logBase       int
-	logPath       string
-	logFile       *os.File // combined log retained for the Resource endpoint
-	stdoutLogPath string
-	stdoutLogFile *os.File
-	stderrLogPath string
-	stderrLogFile *os.File
-	logSize       int64
-	stdoutLogSize int64
-	stderrLogSize int64
-	logTruncated  bool
-	stdoutBuf     bytes.Buffer
-	stderrBuf     bytes.Buffer
-	stdoutBase    int
-	stderrBase    int
-	stdoutOffset  int64
-	stderrOffset  int64
-	stdin         io.WriteCloser
-	done          chan struct{}
-	db            *sql.DB
-	cmd           *exec.Cmd
-	cancel        context.CancelFunc
-	outputSink    func(OutputChunk)
+	mu           sync.Mutex
+	logBuf       bytes.Buffer
+	logBase      int
+	log          fileLog // combined log retained for the Resource endpoint
+	stdoutLog    fileLog
+	stderrLog    fileLog
+	logTruncated bool
+	stdoutBuf    bytes.Buffer
+	stderrBuf    bytes.Buffer
+	stdoutBase   int
+	stderrBase   int
+	stdoutOffset int64
+	stderrOffset int64
+	stdin        io.WriteCloser
+	done         chan struct{}
+	db           *sql.DB
+	cmd          *exec.Cmd
+	cancel       context.CancelFunc
+	outputSink   func(OutputChunk)
 }
 
 const maxTaskLogBytes = 1 << 20
 
 // MaxPersistedTaskLogBytes bounds the durable task log and is also the
 // default cumulative budget for task output written to observation_events.
+// Once a stream fills its budget the file log becomes a ring: head bytes are
+// evicted in place and the most recent MaxPersistedTaskLogBytes stay readable,
+// so the end of a long task log — where a failure's root cause lives — is
+// never lost.
 const MaxPersistedTaskLogBytes = 32 << 20
+
+// fileLog is the durable, size-bounded log file for one task output stream.
+// size is the logical absolute stream length and may exceed the physical file
+// size once the ring wraps. Reads take logical offsets and clamp them into the
+// readable window so the returned next offset never regresses.
+type fileLog struct {
+	path     string
+	file     *os.File
+	size     int64 // logical bytes accepted
+	writePos int64 // physical write cursor
+	wrapped  bool  // set once the first byte is overwritten
+	capacity int64 // ring capacity; zero falls back to MaxPersistedTaskLogBytes
+}
+
+func (f *fileLog) cap() int64 {
+	if f.capacity > 0 {
+		return f.capacity
+	}
+	return MaxPersistedTaskLogBytes
+}
+
+// write appends content to the ring. truncated is set when eviction first
+// discards output.
+func (f *fileLog) write(content []byte, truncated *bool) error {
+	if f.file == nil || len(content) == 0 {
+		return nil
+	}
+	for len(content) > 0 {
+		if f.writePos >= f.cap() {
+			if !f.wrapped {
+				f.wrapped = true
+				if truncated != nil {
+					*truncated = true
+				}
+			}
+			f.writePos = 0
+		}
+		n := int64(len(content))
+		if remaining := f.cap() - f.writePos; n > remaining {
+			n = remaining
+		}
+		if _, err := f.file.WriteAt(content[:n], f.writePos); err != nil {
+			return err
+		}
+		f.writePos += n
+		f.size += n
+		content = content[n:]
+	}
+	return nil
+}
+
+// window returns the readable logical byte range. A wrapped ring keeps the
+// most recent capacity bytes. A wrapped file restored after a process restart
+// no longer knows its rotation point, so only the pre-wrap prefix is exposed
+// instead of returning overwritten bytes in a rotated (misleading) order.
+func (f *fileLog) window() (base, end int64) {
+	if f.wrapped {
+		return f.size - f.cap(), f.size
+	}
+	if f.size > f.cap() {
+		return 0, f.cap()
+	}
+	return 0, f.size
+}
+
+func (f *fileLog) physical(logical int64) int64 {
+	if !f.wrapped {
+		return logical
+	}
+	p := f.writePos - (f.size - logical)
+	if p < 0 {
+		p += f.cap()
+	}
+	return p
+}
+
+// dropped reports how many logical head bytes the ring evicted.
+func (f *fileLog) dropped() int64 {
+	if f.wrapped {
+		return f.size - f.cap()
+	}
+	return 0
+}
+
+// read returns up to limit logical bytes from offset. offset is clamped into
+// the readable window; the returned next offset is monotonic. ok is false when
+// the backing file cannot be opened.
+func (f *fileLog) read(offset, limit int64) (data []byte, next int64, ok bool) {
+	base, end := f.window()
+	if offset < base {
+		offset = base
+	}
+	if offset > end {
+		offset = end
+	}
+	if limit > end-offset {
+		limit = end - offset
+	}
+	if limit <= 0 {
+		return nil, offset, true
+	}
+	file, err := os.Open(f.path)
+	if err != nil {
+		return nil, offset, false
+	}
+	defer file.Close()
+	buf := make([]byte, limit)
+	total := 0
+	if f.wrapped {
+		if run := f.cap() - f.physical(offset); run < limit {
+			// The range crosses the wrap seam: read to the physical end, then
+			// continue at position 0 where the newest bytes were overwritten.
+			n, _ := file.ReadAt(buf[:run], f.physical(offset))
+			total = int(n)
+			if total < int(run) {
+				return buf[:total], offset + int64(total), true
+			}
+			n2, _ := file.ReadAt(buf[total:], 0)
+			total += int(n2)
+			return buf[:total], offset + int64(total), true
+		}
+	}
+	n, _ := file.ReadAt(buf[total:], f.physical(offset))
+	total += int(n)
+	return buf[:total], offset + int64(total), true
+}
 
 // TaskManager tracks long tasks per process.
 type TaskManager struct {
@@ -229,22 +353,22 @@ func (m *TaskManager) startPrepared(requestID, callID, tool, remoteSessionID, wo
 		cmd: cmd, cancel: cancel, done: make(chan struct{}), outputSink: m.emitOutput,
 	}
 	if m.db != nil {
-		t.logPath = filepath.Join(m.logDir, id+".log")
-		t.stdoutLogPath = filepath.Join(m.logDir, id+".stdout.log")
-		t.stderrLogPath = filepath.Join(m.logDir, id+".stderr.log")
+		t.log.path = filepath.Join(m.logDir, id+".log")
+		t.stdoutLog.path = filepath.Join(m.logDir, id+".stdout.log")
+		t.stderrLog.path = filepath.Join(m.logDir, id+".stderr.log")
 		var err error
-		if t.logFile, err = os.OpenFile(t.logPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err != nil {
+		if t.log.file, err = os.OpenFile(t.log.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err != nil {
 			cancel()
 			return nil, fmt.Errorf("create task log: %w", err)
 		}
-		if t.stdoutLogFile, err = os.OpenFile(t.stdoutLogPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err != nil {
-			_ = t.logFile.Close()
+		if t.stdoutLog.file, err = os.OpenFile(t.stdoutLog.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err != nil {
+			_ = t.log.file.Close()
 			cancel()
 			return nil, fmt.Errorf("create stdout log: %w", err)
 		}
-		if t.stderrLogFile, err = os.OpenFile(t.stderrLogPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err != nil {
-			_ = t.stdoutLogFile.Close()
-			_ = t.logFile.Close()
+		if t.stderrLog.file, err = os.OpenFile(t.stderrLog.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err != nil {
+			_ = t.stdoutLog.file.Close()
+			_ = t.log.file.Close()
 			cancel()
 			return nil, fmt.Errorf("create stderr log: %w", err)
 		}
@@ -280,7 +404,7 @@ func (m *TaskManager) startPrepared(requestID, callID, tool, remoteSessionID, wo
 		_, err := m.db.Exec(`INSERT INTO terminal_tasks
             (id, remote_session_id, workspace_name, workspace_path, command, status, pid, log_path, started_at, updated_at)
             VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)`, t.ID, t.RemoteSessionID, t.WorkspaceName,
-			t.WorkDir, t.Command, t.PID, t.logPath, t.StartedAt.UnixMilli(), t.StartedAt.UnixMilli())
+			t.WorkDir, t.Command, t.PID, t.log.path, t.StartedAt.UnixMilli(), t.StartedAt.UnixMilli())
 		if err != nil {
 			killProcessTree(cmd)
 			_, _ = cmd.Process.Wait()
@@ -308,6 +432,7 @@ func (m *TaskManager) startPrepared(requestID, callID, tool, remoteSessionID, wo
 		if t.Status == TaskKilled {
 			t.finishLocked(TaskKilled, -1)
 			t.mu.Unlock()
+			t.persistFinish()
 			t.emitOutputFinal()
 			close(t.done)
 			return
@@ -324,6 +449,10 @@ func (m *TaskManager) startPrepared(requestID, callID, tool, remoteSessionID, wo
 		t.ExitCode = &code
 		t.finishLocked(TaskExited, code)
 		t.mu.Unlock()
+		// Persist completion before publishing done. Runtime.Close can close the
+		// shared database immediately after Wait returns; an async update here
+		// would race that close and leave SQLite sidecar rows behind.
+		t.persistFinish()
 		t.emitOutputFinal()
 		close(t.done)
 		cancel()
@@ -339,26 +468,25 @@ type lockedWriter struct {
 func (w *lockedWriter) Write(p []byte) (int, error) {
 	w.t.mu.Lock()
 	n := len(p)
-	if err := writeBounded(w.t.logFile, &w.t.logSize, p, &w.t.logTruncated); err != nil {
+	if err := w.t.log.write(p, &w.t.logTruncated); err != nil {
 		w.t.mu.Unlock()
 		return n, err
 	}
 	var (
-		streamFile *os.File
-		streamSize *int64
+		streamLog  *fileLog
 		streamBuf  *bytes.Buffer
 		streamBase *int
 	)
 	if w.stream == "stderr" {
-		streamFile, streamSize, streamBuf, streamBase = w.t.stderrLogFile, &w.t.stderrLogSize, &w.t.stderrBuf, &w.t.stderrBase
+		streamLog, streamBuf, streamBase = &w.t.stderrLog, &w.t.stderrBuf, &w.t.stderrBase
 	} else {
-		streamFile, streamSize, streamBuf, streamBase = w.t.stdoutLogFile, &w.t.stdoutLogSize, &w.t.stdoutBuf, &w.t.stdoutBase
+		streamLog, streamBuf, streamBase = &w.t.stdoutLog, &w.t.stdoutBuf, &w.t.stdoutBase
 	}
 	offset := w.t.stdoutOffset
 	if w.stream == "stderr" {
 		offset = w.t.stderrOffset
 	}
-	if err := writeBounded(streamFile, streamSize, p, &w.t.logTruncated); err != nil {
+	if err := streamLog.write(p, &w.t.logTruncated); err != nil {
 		w.t.mu.Unlock()
 		return n, err
 	}
@@ -383,48 +511,34 @@ func (w *lockedWriter) Write(p []byte) (int, error) {
 		RemoteSessionID: w.t.RemoteSessionID, WorkspaceName: w.t.WorkspaceName,
 		Command: w.t.Command, WorkDir: w.t.WorkDir, Stream: w.stream, Offset: offset, Data: append([]byte(nil), p...),
 	}
-	w.t.mu.Unlock()
+	// Calling the sink while holding t.mu guarantees every data chunk is
+	// delivered before a final chunk assembled later under the same mutex
+	// (happens-before), so the observation stream cannot reorder the tail. The
+	// sink contract is quick, non-blocking, and must not call back into the
+	// task; the observation bridge only buffers and enqueues.
 	if sink != nil {
 		sink(chunk)
 	}
+	w.t.mu.Unlock()
 	return n, nil
 }
 
 func (t *Task) emitOutputFinal() {
+	// Final chunks are emitted under t.mu so they cannot overtake a data chunk
+	// that is still being delivered by lockedWriter.Write.
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	sink := t.outputSink
+	if sink == nil {
+		return
+	}
 	chunks := []OutputChunk{
 		{TaskID: t.ID, RequestID: t.RequestID, CallID: t.CallID, Tool: t.Tool, RemoteSessionID: t.RemoteSessionID, WorkspaceName: t.WorkspaceName, Command: t.Command, WorkDir: t.WorkDir, Stream: "stdout", Offset: t.stdoutOffset, Final: true},
 		{TaskID: t.ID, RequestID: t.RequestID, CallID: t.CallID, Tool: t.Tool, RemoteSessionID: t.RemoteSessionID, WorkspaceName: t.WorkspaceName, Command: t.Command, WorkDir: t.WorkDir, Stream: "stderr", Offset: t.stderrOffset, Final: true},
 	}
-	t.mu.Unlock()
-	if sink == nil {
-		return
-	}
 	for _, chunk := range chunks {
 		sink(chunk)
 	}
-}
-
-func writeBounded(file *os.File, size *int64, content []byte, truncated *bool) error {
-	if file == nil || *size >= MaxPersistedTaskLogBytes {
-		if file != nil && len(content) > 0 {
-			*truncated = true
-		}
-		return nil
-	}
-	remaining := MaxPersistedTaskLogBytes - *size
-	write := content
-	if int64(len(write)) > remaining {
-		write = write[:remaining]
-		*truncated = true
-	}
-	written, err := file.Write(write)
-	*size += int64(written)
-	if len(write) < len(content) {
-		*truncated = true
-	}
-	return err
 }
 
 // Get returns task if the Remote Session owns it.
@@ -441,15 +555,15 @@ func (m *TaskManager) Get(remoteSessionID, taskID string) (*Task, error) {
             status, pid, exit_code, log_path, log_size, log_truncated, started_at, finished_at, limit_reason
             FROM terminal_tasks WHERE id = ? AND remote_session_id = ?`, taskID, remoteSessionID).Scan(
 			&t.ID, &t.RemoteSessionID, &t.WorkspaceName, &t.WorkDir, &t.Command, &t.Status, &t.PID,
-			&exitCode, &t.logPath, &t.logSize, &truncated, &startedAt, &finishedAt, &t.LimitReason)
+			&exitCode, &t.log.path, &t.log.size, &truncated, &startedAt, &finishedAt, &t.LimitReason)
 		if err != nil {
 			return nil, fmt.Errorf("task not found")
 		}
 		t.StartedAt = time.UnixMilli(startedAt).UTC()
 		t.logTruncated = truncated != 0
-		if t.logPath != "" {
-			t.stdoutLogPath = strings.TrimSuffix(t.logPath, ".log") + ".stdout.log"
-			t.stderrLogPath = strings.TrimSuffix(t.logPath, ".log") + ".stderr.log"
+		if t.log.path != "" {
+			t.stdoutLog.path = strings.TrimSuffix(t.log.path, ".log") + ".stdout.log"
+			t.stderrLog.path = strings.TrimSuffix(t.log.path, ".log") + ".stderr.log"
 		}
 		t.db = m.db
 		if exitCode.Valid {
@@ -484,6 +598,9 @@ func (t *Task) StatusView() map[string]any {
 		"command":           t.Command,
 		"log_truncated":     t.logTruncated,
 	}
+	if dropped := t.log.dropped(); dropped > 0 {
+		out["log_dropped_bytes"] = dropped
+	}
 	if t.FinishedAt != nil {
 		out["finished_at"] = *t.FinishedAt
 		out["runtime_ms"] = t.FinishedAt.Sub(t.StartedAt).Milliseconds()
@@ -513,45 +630,26 @@ func (t *Task) LogsFor(stream string, offset int) (chunk string, next int) {
 	}
 }
 
+const logsChunkLimit = 256 << 10
+
 func (t *Task) logsFor(stream string, offset int) (chunk string, next int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	path := t.logPath
+	f := &t.log
 	buffer := &t.logBuf
 	base := t.logBase
-	if stream == "stdout" {
-		path, buffer, base = t.stdoutLogPath, &t.stdoutBuf, t.stdoutBase
-	} else if stream == "stderr" {
-		path, buffer, base = t.stderrLogPath, &t.stderrBuf, t.stderrBase
+	switch stream {
+	case "stdout":
+		f, buffer, base = &t.stdoutLog, &t.stdoutBuf, t.stdoutBase
+	case "stderr":
+		f, buffer, base = &t.stderrLog, &t.stderrBuf, t.stderrBase
 	}
-	if path != "" {
-		file, err := os.Open(path)
-		if err != nil {
+	if f.path != "" {
+		data, next64, ok := f.read(int64(offset), logsChunkLimit)
+		if !ok {
 			return "", offset
 		}
-		defer file.Close()
-		info, err := file.Stat()
-		if err != nil {
-			return "", offset
-		}
-		size := info.Size()
-		if offset < 0 {
-			offset = 0
-		}
-		if int64(offset) > size {
-			offset = int(size)
-		}
-		const chunkLimit = 256 << 10
-		remaining := size - int64(offset)
-		if remaining > chunkLimit {
-			remaining = chunkLimit
-		}
-		data := make([]byte, int(remaining))
-		read, _ := file.ReadAt(data, int64(offset))
-		if read == 0 && remaining != 0 {
-			return "", offset
-		}
-		return string(data[:read]), offset + read
+		return string(data), int(next64)
 	}
 	data := buffer.Bytes()
 	if offset < base {
@@ -568,21 +666,22 @@ func (t *Task) LogSize() int64 {
 }
 
 // LogStreamSize returns the absolute byte size for a requested output stream.
+// For ring-truncated streams this is the logical stream length, which may
+// exceed the physical file size because head bytes were evicted.
 func (t *Task) LogStreamSize(stream string) int64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	path := t.logPath
+	f := &t.log
 	buffer := &t.logBuf
 	base := t.logBase
-	if stream == "stdout" {
-		path, buffer, base = t.stdoutLogPath, &t.stdoutBuf, t.stdoutBase
-	} else if stream == "stderr" {
-		path, buffer, base = t.stderrLogPath, &t.stderrBuf, t.stderrBase
+	switch stream {
+	case "stdout":
+		f, buffer, base = &t.stdoutLog, &t.stdoutBuf, t.stdoutBase
+	case "stderr":
+		f, buffer, base = &t.stderrLog, &t.stderrBuf, t.stderrBase
 	}
-	if path != "" {
-		if info, err := os.Stat(path); err == nil {
-			return info.Size()
-		}
+	if f.path != "" {
+		return f.size
 	}
 	return int64(base + buffer.Len())
 }
@@ -593,15 +692,16 @@ func (t *Task) ReadAllLogs(maxBytes int64) ([]byte, error) {
 	if maxBytes <= 0 {
 		maxBytes = 8 << 20
 	}
-	if t.logPath != "" {
-		info, err := os.Stat(t.logPath)
-		if err != nil {
-			return nil, err
-		}
-		if info.Size() > maxBytes {
+	if t.log.path != "" {
+		base, end := t.log.window()
+		if end-base > maxBytes {
 			return nil, fmt.Errorf("task log exceeds resource limit; use terminal_logs pagination")
 		}
-		return os.ReadFile(t.logPath)
+		data, _, ok := t.log.read(base, end-base)
+		if !ok {
+			return nil, fmt.Errorf("task log is unavailable")
+		}
+		return data, nil
 	}
 	if int64(t.logBuf.Len()) > maxBytes {
 		return nil, fmt.Errorf("task log exceeds resource limit; use terminal_logs pagination")
@@ -623,21 +723,26 @@ func (m *TaskManager) pruneFinishedLocked(target int) {
 	}
 }
 
-// Kill stops the task.
+// Kill stops the task. It is idempotent: killing a task that already left the
+// running state is a no-op. Terminal state is recorded while holding the task
+// mutex, but the process kill and the SQLite persistence happen outside it so
+// a slow database write never blocks concurrent output writes or log reads.
 func (t *Task) Kill() error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	if t.Status != TaskRunning {
+		t.mu.Unlock()
 		return nil
 	}
-	t.Status = TaskKilled
-	if t.cancel != nil {
-		t.cancel()
-	}
-	killProcessTree(t.cmd)
 	code := -1
 	t.ExitCode = &code
 	t.finishLocked(TaskKilled, code)
+	cmd, cancel := t.cmd, t.cancel
+	t.mu.Unlock()
+	killProcessTree(cmd)
+	if cancel != nil {
+		cancel()
+	}
+	t.persistFinish()
 	return nil
 }
 
@@ -760,7 +865,14 @@ func (m *TaskManager) List(remoteSessionID string, limit int) ([]map[string]any,
 	return items, nil
 }
 
+// finishLocked records terminal state in memory. Callers hold t.mu and must
+// call persistFinish after unlocking. The FinishedAt guard makes repeat calls
+// idempotent — when Kill races the Wait goroutine, the first finish wins and
+// FinishedAt is never overwritten.
 func (t *Task) finishLocked(status TaskStatus, code int) {
+	if t.FinishedAt != nil {
+		return
+	}
 	now := time.Now().UTC()
 	t.Status = status
 	t.ExitCode = &code
@@ -770,27 +882,40 @@ func (t *Task) finishLocked(status TaskStatus, code int) {
 		t.stdin = nil
 	}
 	t.closeFiles()
-	if t.db != nil {
-		// Persist completion before publishing done. Runtime.Close can close the
-		// shared database immediately after Wait returns; an async update here
-		// would race that close and leave SQLite sidecars behind.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_, _ = t.db.ExecContext(ctx, `UPDATE terminal_tasks SET status = ?, exit_code = ?, log_size = ?, log_truncated = ?, limit_reason = ?, finished_at = ?, updated_at = ? WHERE id = ?`,
-			status, code, t.logSize, boolInt(t.logTruncated), t.LimitReason, now.UnixMilli(), now.UnixMilli(), t.ID)
+}
+
+// persistFinish stores terminal task state in SQLite without holding t.mu, so
+// the synchronous database round trip never blocks output or log reads.
+func (t *Task) persistFinish() {
+	if t.db == nil {
+		return
 	}
+	t.mu.Lock()
+	if t.FinishedAt == nil {
+		t.mu.Unlock()
+		return
+	}
+	finishedAt := *t.FinishedAt
+	status, id, logSize, truncated, limitReason := t.Status, t.ID, t.log.size, t.logTruncated, t.LimitReason
+	code := -1
+	if t.ExitCode != nil {
+		code = *t.ExitCode
+	}
+	t.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = t.db.ExecContext(ctx, `UPDATE terminal_tasks SET status = ?, exit_code = ?, log_size = ?, log_truncated = ?, limit_reason = ?, finished_at = ?, updated_at = ? WHERE id = ?`,
+		status, code, logSize, boolInt(truncated), limitReason, finishedAt.UnixMilli(), finishedAt.UnixMilli(), id)
 }
 
 func (t *Task) closeFiles() {
-	for _, file := range []*os.File{t.logFile, t.stdoutLogFile, t.stderrLogFile} {
-		if file != nil {
-			_ = file.Sync()
-			_ = file.Close()
+	for _, file := range []*fileLog{&t.log, &t.stdoutLog, &t.stderrLog} {
+		if file.file != nil {
+			_ = file.file.Sync()
+			_ = file.file.Close()
+			file.file = nil
 		}
 	}
-	t.logFile = nil
-	t.stdoutLogFile = nil
-	t.stderrLogFile = nil
 }
 
 // Wait waits for a live task to exit. Restored tasks have no process and are

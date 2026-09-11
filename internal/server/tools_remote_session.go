@@ -139,6 +139,13 @@ func (r *Runtime) remoteError(envReq envelope.Request, remoteSessionID, workspac
 			extra = map[string]any{"recent_sessions": r.recentSessionSummaries(workspace, 3)}
 		}
 	}
+	var versionConflict *remotesession.VersionConflictError
+	if errors.As(err, &versionConflict) {
+		if extra == nil {
+			extra = map[string]any{}
+		}
+		extra["current_version"] = versionConflict.CurrentVersion
+	}
 	resp := envelope.Fail(status, envReq.RequestID, workspace, extra, code, message)
 	resp.RemoteSessionID = remoteSessionID
 	switch code {
@@ -161,6 +168,10 @@ func (r *Runtime) remoteError(envReq envelope.Request, remoteSessionID, workspac
 			addRecoveryAction(&resp, "session", "open or resume a Remote Session before using this tool", map[string]any{"workspace": workspace})
 		} else {
 			addRecoveryAction(&resp, "workspace", "select a workspace before opening a Remote Session", map[string]any{})
+		}
+	case "version_conflict":
+		if remoteSessionID != "" {
+			addRecoveryAction(&resp, "session", "重读该 Remote Session 最新状态后，用 data.current_version 指出的版本重试一次更新", map[string]any{"remote_session_id": remoteSessionID})
 		}
 	}
 	return r.resultJSON(resp)

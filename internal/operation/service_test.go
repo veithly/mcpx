@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -281,5 +282,121 @@ func TestServiceRecoversFromExecutorPanicAndKeepsWorkerUsable(t *testing.T) {
 	final, timedOut, err = service.Wait(context.Background(), recovered.ID, 2*time.Second)
 	if err != nil || timedOut || final.State != StateSucceeded {
 		t.Fatalf("worker did not recover: final=%+v timedOut=%v err=%v", final, timedOut, err)
+	}
+}
+
+func TestStepTimeoutFailsStepAndKeepsWorkerUsable(t *testing.T) {
+	service := newTestService(t, 1)
+	service.stepTimeout = 50 * time.Millisecond
+	started := make(chan struct{})
+	record, err := service.Submit(context.Background(), SubmitSpec{
+		RemoteSessionID: "session", WorkspaceName: "workspace", RequestID: "timeout_request", Purpose: "step deadline",
+		Steps: []StepSpec{{ID: "stuck", Tool: "execute"}},
+	}, func(ctx context.Context, input ExecuteInput) ExecuteResult {
+		close(started)
+		<-ctx.Done()
+		return ExecuteResult{Err: ctx.Err()}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("step did not start")
+	}
+	final, waitTimedOut, err := service.Wait(context.Background(), record.ID, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waitTimedOut || final.State != StateFailed {
+		t.Fatalf("final=%+v waitTimedOut=%v", final, waitTimedOut)
+	}
+	var stepError string
+	for _, step := range final.Steps {
+		if step.ID == "stuck" {
+			if step.State != StateFailed {
+				t.Fatalf("stuck step=%+v", step)
+			}
+			stepError = string(step.Error)
+		}
+	}
+	if !strings.Contains(stepError, "RUNTIME_STEP_TIMEOUT") {
+		t.Fatalf("step error %q does not mention RUNTIME_STEP_TIMEOUT", stepError)
+	}
+	// The deadline must free the worker for the next operation.
+	recovered, err := service.Submit(context.Background(), SubmitSpec{
+		RemoteSessionID: "session", WorkspaceName: "workspace", RequestID: "after_timeout", Purpose: "worker recovery",
+		Steps: []StepSpec{{ID: "after", Tool: "read"}},
+	}, func(context.Context, ExecuteInput) ExecuteResult {
+		return ExecuteResult{Result: []byte(`{"recovered":true}`)}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, waitTimedOut, err = service.Wait(context.Background(), recovered.ID, 2*time.Second)
+	if err != nil || waitTimedOut || final.State != StateSucceeded {
+		t.Fatalf("worker did not recover after timeout: final=%+v waitTimedOut=%v err=%v", final, waitTimedOut, err)
+	}
+}
+
+func TestSubmitDoesNotBlockWhenWorkersBusyAndQueueFull(t *testing.T) {
+	service := newTestService(t, 1)
+	release := make(chan struct{})
+	started := make(chan string, 8)
+	executor := func(ctx context.Context, input ExecuteInput) ExecuteResult {
+		started <- input.StepID
+		if input.StepID == "holder" {
+			<-release
+		}
+		return ExecuteResult{Result: []byte(`{}`)}
+	}
+	holder, err := service.Submit(context.Background(), SubmitSpec{
+		ID: "op_holder", RemoteSessionID: "session", WorkspaceName: "workspace", RequestID: "request", Purpose: "hold the worker",
+		Steps: []StepSpec{{ID: "holder", Tool: "execute"}},
+	}, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("holder step did not start")
+	}
+
+	// The only worker is pinned by op_holder and the queue capacity is
+	// workers*2 = 2. Extra submissions overflow into the pending set, so every
+	// Submit must still return promptly instead of blocking on the queue.
+	type submitOutcome struct {
+		id  string
+		err error
+	}
+	submitted := make(chan submitOutcome, 4)
+	for _, id := range []string{"op_full_a", "op_full_b", "op_overflow_c", "op_overflow_d"} {
+		operationID := id
+		go func() {
+			_, err := service.Submit(context.Background(), SubmitSpec{
+				ID: operationID, RemoteSessionID: "session", WorkspaceName: "workspace", RequestID: operationID, Purpose: "queue pressure",
+				Steps: []StepSpec{{ID: "step_" + operationID, Tool: "read"}},
+			}, executor)
+			submitted <- submitOutcome{id: operationID, err: err}
+		}()
+	}
+	for i := 0; i < 4; i++ {
+		select {
+		case outcome := <-submitted:
+			if outcome.err != nil {
+				t.Fatalf("Submit %s failed: %v", outcome.id, outcome.err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("Submit blocked while workers were busy and the queue was full (got %d/4 back)", i)
+		}
+	}
+	close(release)
+	for _, id := range []string{holder.ID, "op_full_a", "op_full_b", "op_overflow_c", "op_overflow_d"} {
+		final, waitTimedOut, err := service.Wait(context.Background(), id, 5*time.Second)
+		if err != nil || waitTimedOut || final.State != StateSucceeded {
+			t.Fatalf("operation %s: final=%+v waitTimedOut=%v err=%v", id, final.State, waitTimedOut, err)
+		}
 	}
 }

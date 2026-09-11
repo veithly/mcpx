@@ -28,6 +28,16 @@ const (
 	operationEventCompleted     = "operation.completed"
 )
 
+// DefaultStepTimeout is the wall-clock deadline for one operation step. It
+// bounds runaway steps (an executor that waits on a task with no wall limit,
+// a wedged public tool) so workers and the job queue can never be pinned
+// forever. The runtime executor honors the step context and kills the terminal
+// Task it started when the deadline fires.
+const DefaultStepTimeout = 30 * time.Minute
+
+// ErrStepTimeout marks a step that exceeded the execution wall deadline.
+var ErrStepTimeout = errors.New("RUNTIME_STEP_TIMEOUT")
+
 var (
 	ErrNotFound         = errors.New("operation not found")
 	ErrInvalidSpec      = errors.New("invalid operation specification")
@@ -39,9 +49,11 @@ var (
 type Service struct {
 	db             *sql.DB
 	now            func() time.Time
+	stepTimeout    time.Duration
 	mu             sync.Mutex
 	active         map[string]*activeOperation
 	jobs           chan stepJob
+	pendingJobs    []stepJob
 	workspaceLocks map[string]*sync.RWMutex
 	sink           EventSink
 	stop           chan struct{}
@@ -89,6 +101,7 @@ func New(db *sql.DB, workers int, sink EventSink) (*Service, error) {
 	s := &Service{
 		db:             db,
 		now:            time.Now,
+		stepTimeout:    DefaultStepTimeout,
 		active:         make(map[string]*activeOperation),
 		jobs:           make(chan stepJob, workers*2),
 		workspaceLocks: make(map[string]*sync.RWMutex),
@@ -438,6 +451,10 @@ func (s *Service) worker() {
 		select {
 		case job := <-s.jobs:
 			s.runStep(job)
+			// A queue slot just freed up; retry ready jobs that did not fit.
+			s.mu.Lock()
+			s.dispatchPendingLocked()
+			s.mu.Unlock()
 		case <-s.stop:
 			return
 		}
@@ -467,7 +484,9 @@ func (s *Service) runStep(job stepJob) {
 		lock.RLock()
 		defer lock.RUnlock()
 	}
-	stepCtx, cancel := context.WithCancel(active.ctx)
+	// The step deadline bounds the executor wait. active.ctx carries no
+	// deadline, so DeadlineExceeded on stepCtx can only come from here.
+	stepCtx, cancel := context.WithTimeout(active.ctx, s.stepTimeout)
 	s.mu.Lock()
 	active.stepCancel[job.stepID] = cancel
 	s.mu.Unlock()
@@ -478,6 +497,9 @@ func (s *Service) runStep(job stepJob) {
 		RemoteSessionID: activeSpecSession(s, job.operationID), WorkspaceName: activeSpecWorkspace(s, job.operationID),
 		Purpose: activeSpecPurpose(s, job.operationID), Tool: step.Tool, Arguments: argumentsOrEmpty(step.Arguments),
 	})
+	// Only the step's own deadline turns into a failure; a result the executor
+	// produced before the deadline fired keeps its outcome.
+	timedOut := stepCtx.Err() == context.DeadlineExceeded && result.Err != nil
 	cancel()
 	s.mu.Lock()
 	delete(active.stepCancel, job.stepID)
@@ -488,12 +510,15 @@ func (s *Service) runStep(job stepJob) {
 		state = StateCancelled
 	} else if result.WaitingConfirmation {
 		state = StateWaitingConfirmation
-	} else if result.Err != nil {
+	} else if timedOut || result.Err != nil {
 		state = StateFailed
 	}
 	errorJSON := json.RawMessage(`{}`)
 	if result.Err != nil {
 		errorJSON = errorValue(result.Err)
+	}
+	if state == StateFailed && timedOut {
+		errorJSON = errorValue(fmt.Errorf("%w: step exceeded the %s execution deadline", ErrStepTimeout, s.stepTimeout))
 	}
 	if !s.finishStep(job.operationID, job.stepID, state, result.Result, errorJSON, result.ConfirmationToken) {
 		return
@@ -517,12 +542,11 @@ func (s *Service) enqueueReady(operationID string) {
 		return
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	active := s.active[operationID]
 	if active == nil || active.cancelRequested {
-		s.mu.Unlock()
 		return
 	}
-	jobs := make([]stepJob, 0)
 	byID := make(map[string]StepRecord, len(record.Steps))
 	for _, step := range record.Steps {
 		byID[step.ID] = step
@@ -540,14 +564,24 @@ func (s *Service) enqueueReady(operationID string) {
 		}
 		if ready {
 			active.enqueued[step.ID] = true
-			jobs = append(jobs, stepJob{operationID: operationID, stepID: step.ID})
+			s.pendingJobs = append(s.pendingJobs, stepJob{operationID: operationID, stepID: step.ID})
 		}
 	}
-	s.mu.Unlock()
-	for _, job := range jobs {
+	s.dispatchPendingLocked()
+}
+
+// dispatchPendingLocked moves ready jobs into the queue without ever blocking.
+// Jobs that do not fit stay pending; a worker retries them as soon as it
+// finishes a step and frees a queue slot. Submit and reconcile therefore can
+// never wedge on a full queue, and "queue full with nobody consuming" is
+// impossible: every consumer drains pending before it blocks on the queue.
+func (s *Service) dispatchPendingLocked() {
+	for len(s.pendingJobs) > 0 {
 		select {
-		case s.jobs <- job:
-		case <-s.stop:
+		case s.jobs <- s.pendingJobs[0]:
+			s.pendingJobs[0] = stepJob{}
+			s.pendingJobs = s.pendingJobs[1:]
+		default:
 			return
 		}
 	}
@@ -667,6 +701,7 @@ func aggregateState(steps []StepRecord) State {
 	anyRunning := false
 	anyWaiting := false
 	anyFailed := false
+	anyCancelled := false
 	for _, step := range steps {
 		switch step.State {
 		case StateQueued:
@@ -679,7 +714,13 @@ func aggregateState(steps []StepRecord) State {
 			anyWaiting = true
 		case StateFailed:
 			anyFailed = true
-		case StateCancelled, StateInterrupted:
+		case StateCancelled:
+			// Cancellation is a deliberate stop, not a failure. Reporting it
+			// as one would let a late reconcile (racing the worker that
+			// recorded the cancellation) overwrite a cancelled operation with
+			// StateFailed.
+			anyCancelled = true
+		case StateInterrupted:
 			anyFailed = true
 		case StateSucceeded, StateSkipped:
 		default:
@@ -688,6 +729,9 @@ func aggregateState(steps []StepRecord) State {
 	}
 	if anyFailed && !anyRunning && !anyWaiting && allTerminal {
 		return StateFailed
+	}
+	if anyCancelled && !anyRunning && !anyWaiting && allTerminal {
+		return StateCancelled
 	}
 	if anyRunning || !allTerminal && !anyWaiting {
 		return StateRunning

@@ -136,8 +136,11 @@ func (r *Runtime) toolOperationManage(ctx context.Context, req *mcp.CallToolRequ
 		if timeout <= 0 {
 			timeout = 30 * time.Second
 		}
-		if timeout > 60*time.Second {
-			timeout = 60 * time.Second
+		// Wait arguments must stay inside the synchronous response budget;
+		// otherwise every long wait degrades into TOOL_TIMEOUT instead of an
+		// Accepted reply plus operation_manage(status/result) polling.
+		if timeout > toolWaitMax {
+			timeout = toolWaitMax
 		}
 		record, timedOut, err := r.operations.Wait(ctx, operationID, timeout)
 		if err != nil {
@@ -392,6 +395,12 @@ func operationView(record operation.Record, includeResults bool) map[string]any 
 		if includeResults {
 			view["result"] = operationResultValue(step.Result)
 			view["error"] = decodeJSONValue(step.Error)
+		} else if summary := stepErrorSummary(step.Error); stepFailedOrStopped(step.State) && summary != "" {
+			// Compact status views still need to know why a step stopped
+			// (RUNTIME_STEP_TIMEOUT, PROCESS_EXIT, ...) without paging in the
+			// full machine result; the complete error stays behind
+			// operation_manage(action=result).
+			view["error"] = summary
 		}
 		steps = append(steps, view)
 	}
@@ -411,6 +420,39 @@ func operationView(record operation.Record, includeResults bool) map[string]any 
 	// duplicate the same payload at the top level. Callers that need the
 	// aggregate or paged bytes use operation_manage(action=result).
 	return data
+}
+
+// stepFailedOrStopped reports whether a step ended without success and may
+// therefore carry an error summary in compact status views.
+func stepFailedOrStopped(state operation.State) bool {
+	switch state {
+	case operation.StateFailed, operation.StateInterrupted, operation.StateCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+// stepErrorSummary flattens a durable step error_json ({message|code: ...}) or
+// the stored result envelope's error body into a short machine-readable string.
+func stepErrorSummary(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	value := decodeJSONValue(raw)
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, field := range []string{"message", "code", "error"} {
+			if text, _ := typed[field].(string); strings.TrimSpace(text) != "" {
+				return strings.TrimSpace(text)
+			}
+		}
+		return ""
+	case string:
+		return strings.TrimSpace(typed)
+	default:
+		return ""
+	}
 }
 
 func operationStats(record operation.Record) map[string]any {
