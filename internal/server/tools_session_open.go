@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -80,11 +81,30 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 		latestModelState     any
 	)
 	var tasks any
+	// Bootstrap failures are surfaced, not swallowed: a session that opened
+	// with a broken MCP config or an unreadable task store must say so instead
+	// of answering with a silently empty inventory.
+	var (
+		degradedMu sync.Mutex
+		degraded   []string
+	)
+	markDegraded := func(component string, err error) {
+		degradedMu.Lock()
+		degraded = append(degraded, fmt.Sprintf("%s: load failed: %v", component, err))
+		degradedMu.Unlock()
+	}
 	var bootstrap sync.WaitGroup
 	bootstrap.Add(7)
 	go func() {
 		defer bootstrap.Done()
-		if manager, err := r.mcpManagerForWorkspace(wsPath); err == nil && effective.Discovery.MCP.Enabled {
+		manager, err := r.mcpManagerForWorkspace(wsPath)
+		if err != nil {
+			if effective.Discovery.MCP.Enabled {
+				markDegraded("mcp_servers", err)
+			}
+			return
+		}
+		if effective.Discovery.MCP.Enabled {
 			servers = manager.List()
 		}
 	}()
@@ -115,8 +135,16 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 	go func() {
 		defer bootstrap.Done()
 		pendingConfirmations = pendingConfirmationItems(r.approvals.ListRemoteSession(session.ID))
-		taskList, _ = r.tasks.List(session.ID, 20)
-		artifacts, _ = r.artifacts.List(ctx, session.ID, "", 20)
+		if list, err := r.tasks.List(session.ID, 20); err != nil {
+			markDegraded("terminal_tasks", err)
+		} else {
+			taskList = list
+		}
+		if list, err := r.artifacts.List(ctx, session.ID, "", 20); err != nil {
+			markDegraded("artifacts", err)
+		} else {
+			artifacts = list
+		}
 	}()
 	go func() {
 		defer bootstrap.Done()
@@ -129,11 +157,18 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 			Type:      "progress",
 			Latest:    1,
 		})
-		if err == nil && len(page.Items) > 0 {
+		if err != nil {
+			markDegraded("latest_model_state", err)
+			return
+		}
+		if len(page.Items) > 0 {
 			latestModelState = page.Items[0]
 		}
 	}()
 	bootstrap.Wait()
+	degradedMu.Lock()
+	degradedSources := degraded
+	degradedMu.Unlock()
 
 	var instructionPayload any
 	if includeInstrContent {
@@ -203,6 +238,10 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 	}
 	if latestModelState != nil {
 		data["latest_model_state"] = latestModelState
+	}
+	if len(degradedSources) > 0 {
+		sort.Strings(degradedSources)
+		data["degraded"] = degradedSources
 	}
 
 	r.logAudit(audit.Event{

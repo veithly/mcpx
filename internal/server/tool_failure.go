@@ -23,10 +23,16 @@ func normalizeToolOutcome(ctx context.Context, name string, req *mcp.CallToolReq
 	}
 	if callErr != nil {
 		code := "TOOL_EXECUTION_FAILED"
-		if errors.Is(callErr, context.DeadlineExceeded) {
+		switch {
+		case errors.Is(callErr, context.DeadlineExceeded):
 			code = "TOOL_TIMEOUT"
-		}
-		if errors.Is(callErr, context.Canceled) {
+		case errors.Is(callErr, context.Canceled):
+			code = "TOOL_CANCELLED"
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			// A non-wrapped timeout (fmt.Errorf without %w) must not degrade to
+			// TOOL_EXECUTION_FAILED; the execution context state classifies it.
+			code = "TOOL_TIMEOUT"
+		case errors.Is(ctx.Err(), context.Canceled):
 			code = "TOOL_CANCELLED"
 		}
 		return toolFailure(ctx, name, req, code, callErr.Error(), result)

@@ -29,6 +29,7 @@ type runtimeContextKey struct{}
 type toolInvocationNameKey struct{}
 type operationChildKey struct{}
 type cleanCoreRequestKey struct{}
+type clientContextKey struct{}
 
 // RuntimeContext is server-owned lifecycle metadata. Identity and trace fields
 // come from the Gateway; instrumentTool overrides StartedAtMs from the required
@@ -176,17 +177,18 @@ func isOperationChild(ctx context.Context) bool {
 	return value
 }
 
-// withoutCancelPreservingDeadline detaches work from a disconnected client
-// without removing the bounded deadline installed by boundedTool.
-func withoutCancelPreservingDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
-	if ctx == nil {
-		return context.Background(), func() {}
-	}
-	detached := context.WithoutCancel(ctx)
-	if deadline, ok := ctx.Deadline(); ok {
-		return context.WithDeadline(detached, deadline)
-	}
-	return detached, func() {}
+// withClientContext records the client-attached request context on a detached
+// worker context. boundedTool hands the worker a context that survives both a
+// client disconnect and the response deadline; the stashed context still lets
+// instrumentation distinguish a real disconnect from a server-side timeout
+// when it marks the attempt interrupted.
+func withClientContext(ctx, client context.Context) context.Context {
+	return context.WithValue(ctx, clientContextKey{}, client)
+}
+
+func clientContextFrom(ctx context.Context) (context.Context, bool) {
+	client, ok := ctx.Value(clientContextKey{}).(context.Context)
+	return client, ok && client != nil
 }
 
 // changeRequest resolves the authenticated remote session for tools that need

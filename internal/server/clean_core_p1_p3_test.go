@@ -738,6 +738,7 @@ func TestExecutionOutcomeClassification(t *testing.T) {
 		{name: "wall limit", data: map[string]any{"status": terminal.TaskKilled, "exit_code": -1, "limit_reason": "wall_time_limit"}, wantCode: "RUNTIME_LIMIT_EXCEEDED", wantOutcome: "error"},
 		{name: "cpu limit", data: map[string]any{"status": terminal.TaskKilled, "exit_code": -1, "limit_reason": "cpu_time_limit"}, wantCode: "RUNTIME_LIMIT_EXCEEDED", wantOutcome: "error"},
 		{name: "manual stop", data: map[string]any{"status": terminal.TaskKilled, "exit_code": -1}, wantOutcome: "stopped"},
+		{name: "restart interrupted", data: map[string]any{"status": terminal.TaskInterrupted}, wantCode: "EXECUTION_INTERRUPTED", wantOutcome: "interrupted"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			code, _ := annotateExecutionOutcome(test.data)

@@ -253,6 +253,22 @@ func (r *Runtime) executeApprovedCommandTask(ctx context.Context, envReq envelop
 	return r.executeCommandTask(ctx, envReq, principal, remote, command, yield, purpose, scope, commandDigest, analysis)
 }
 
+// executionOutcomeFailure converts a terminal execution Task failure recorded
+// by annotateExecutionOutcome into the matching error envelope. status and
+// attach queries must never mask a dead, failed, or restart-interrupted Task
+// behind a success envelope; an interrupted Task guides a re-run because
+// attach cannot revive it.
+func (r *Runtime) executionOutcomeFailure(envReq envelope.Request, remote remotesession.Session, data map[string]any, code, message string) (*mcp.CallToolResult, error) {
+	if code == "EXECUTION_INTERRUPTED" {
+		data["next_action"] = nextActionWithReason("execute", "该执行 Task 因 MCPX 重启而中断，attach 无法恢复；确认现场后按原命令重跑", map[string]any{
+			"remote_session_id": remote.ID, "action": "run", "command": data["command"],
+		})
+	}
+	response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, data, code, message)
+	response.RemoteSessionID = remote.ID
+	return r.resultJSON(response)
+}
+
 func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Request, principal auth.Principal, remote remotesession.Session, command string, yield time.Duration, purpose, scope, commandDigest string, analysis security.CommandAnalysis) (*mcp.CallToolResult, error) {
 	originTool := toolInvocationName(ctx)
 	if originTool == "" {
@@ -281,9 +297,7 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 		detail := commandExecutionDetail(purpose, scope, commandDigest, analysis)
 		detail["exit_code"] = data["exit_code"]
 		if code, message := annotateExecutionOutcome(data); code != "" {
-			response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, data, code, message)
-			response.RemoteSessionID = remote.ID
-			return r.resultJSON(response)
+			return r.executionOutcomeFailure(envReq, remote, data, code, message)
 		}
 		r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "command_execute", Command: command, Status: "ok", Detail: detail})
 		result := compactToolResult(data, commandOutputText(ctx, data, fmt.Sprintf("Command completed with exit code %v.", data["exit_code"])))
@@ -674,9 +688,7 @@ func (r *Runtime) executeRuntimeTask(ctx context.Context, envReq envelope.Reques
 		}
 		if code, message := annotateExecutionOutcome(data); code != "" {
 			r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "execute", Command: spec.Command, Status: "error", Detail: detail})
-			response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, data, code, message)
-			response.RemoteSessionID = remote.ID
-			return r.resultJSON(response)
+			return r.executionOutcomeFailure(envReq, remote, data, code, message)
 		}
 		r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "execute", Command: spec.Command, Status: "ok", Detail: detail})
 		return compactToolResult(data, commandOutputText(ctx, data, fmt.Sprintf("%s runtime completed with exit code %v.", spec.Runtime, data["exit_code"]))), nil
@@ -728,8 +740,11 @@ func commandYield(payload map[string]any) time.Duration {
 	if yield <= 0 {
 		return defaultCommandYield
 	}
-	if yield > 60_000 {
-		yield = 60_000
+	// The in-call wait must finish before the synchronous response budget so a
+	// still-running command returns an Accepted envelope with its Task handle,
+	// never a TOOL_TIMEOUT response.
+	if yield > int(toolWaitMax/time.Millisecond) {
+		yield = int(toolWaitMax / time.Millisecond)
 	}
 	return time.Duration(yield) * time.Millisecond
 }
@@ -816,8 +831,15 @@ func (r *Runtime) toolTaskManage(ctx context.Context, req *mcp.CallToolRequest) 
 	}
 	switch action {
 	case "status":
+		// status also serves observe(view=task), which must stay a successful
+		// query for ordinary terminal failures. Only a restart-interrupted Task
+		// is loud enough to demand an error envelope here; every outcome field
+		// stays in data either way.
 		data := task.StatusView()
-		annotateExecutionOutcome(data)
+		code, message := annotateExecutionOutcome(data)
+		if code == "EXECUTION_INTERRUPTED" {
+			return r.executionOutcomeFailure(envReq, remote, data, code, message)
+		}
 		return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, data)
 	case "logs":
 		data := r.taskResultData(task, intPayload(envReq.Payload, "stdout_offset"), intPayload(envReq.Payload, "stderr_offset"))
@@ -845,9 +867,7 @@ func (r *Runtime) toolTaskManage(ctx context.Context, req *mcp.CallToolRequest) 
 			data["next_action"] = nextAction(nextTool, map[string]any{"remote_session_id": remote.ID, "action": "attach", "execution_task_id": task.ID, "stdout_offset": stdoutNext, "stderr_offset": stderrNext, "yield_time_ms": int(commandYield(envReq.Payload) / time.Millisecond)})
 		}
 		if code, message := annotateExecutionOutcome(data); code != "" {
-			response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, data, code, message)
-			response.RemoteSessionID = remote.ID
-			return r.resultJSON(response)
+			return r.executionOutcomeFailure(envReq, remote, data, code, message)
 		}
 		result := compactToolResult(data, commandOutputText(ctx, data, fmt.Sprintf("Task %s attached.", task.ID)))
 		return result, nil
@@ -908,6 +928,13 @@ func annotateExecutionOutcome(data map[string]any) (code, message string) {
 		data["outcome"] = "error"
 		data["error_code"] = "RUNTIME_LIMIT_EXCEEDED"
 		return "RUNTIME_LIMIT_EXCEEDED", fmt.Sprintf("execution exceeded %s", reason)
+	}
+	if status == string(terminal.TaskInterrupted) {
+		// The Task was left running by a previous MCPX process: its final exit
+		// status is unknowable, so callers must never read it as a success.
+		data["outcome"] = "interrupted"
+		data["error_code"] = "EXECUTION_INTERRUPTED"
+		return "EXECUTION_INTERRUPTED", "MCPX restarted while this command was still running; its final exit status is unknown. Attach cannot recover it: verify the current workspace state, then re-run the command if its effects must be guaranteed."
 	}
 	if status == string(terminal.TaskKilled) {
 		data["outcome"] = "stopped"

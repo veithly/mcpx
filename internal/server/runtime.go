@@ -86,6 +86,7 @@ type Runtime struct {
 	workspaceConfigMu sync.Mutex
 	consoleCalls      map[string]consoleLiveCall
 	toolReplays       toolReplayCache // reconnect recovery for interrupted tool calls
+	replayPersistWG   sync.WaitGroup  // in-flight durable replay writes, bounded wait on Close
 	closeOnce         sync.Once
 	closeErr          error
 
@@ -270,6 +271,9 @@ func New(opts Options) (*Runtime, error) {
 		},
 	)
 	runtime.remote.SetEventObserver(runtime.observeRemoteEvent)
+	// Re-arm replayable tool outcomes persisted by previous runs so an
+	// identical retry after a restart replays instead of re-executing.
+	runtime.loadToolReplays(context.Background())
 	// Build the catalog snapshot once at construction time so direct service
 	// calls and the real MCP server observe the same registered schema.
 	catalog := mcp.NewServer(&mcp.Implementation{Name: "mcpx", Version: runtime.build.Version}, nil)
@@ -350,8 +354,11 @@ func buildOAuthServer(cfg *config.Config) (*oauth.Server, error) {
 }
 
 // shutdownGracePeriod bounds how long deploy restarts drain in-flight tool
-// calls after SIGTERM before the process exits.
-const shutdownGracePeriod = 8 * time.Second
+// calls after SIGTERM before the process exits. It covers the full synchronous
+// response budget plus a window for detached workers to persist their recorded
+// outcomes and observation events; the worker hard limit is enforced by process
+// exit when the grace period lapses.
+const shutdownGracePeriod = toolResponseTimeout + 5*time.Second
 
 // Start serves MCP over Streamable HTTP behind the auth/OAuth gateway.
 func (r *Runtime) Start() error {
@@ -427,10 +434,15 @@ func (r *Runtime) Start() error {
 		Addr:              addr,
 		Handler:           gw.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// Console SSE and streamable MCP keep long-lived connections; the idle
+		// bound reaps clients that vanish without a FIN so listeners never silt up.
+		IdleTimeout: 120 * time.Second,
 	}
-	// Graceful shutdown: launchd sends SIGTERM on every deploy restart. Drain
-	// in-flight tool calls briefly so long tasks receive their responses
-	// instead of a severed connection, then release durable resources.
+	// Graceful shutdown: launchd sends SIGTERM on every deploy restart. Close
+	// the console SSE broker first so live streams end immediately instead of
+	// idling through the drain window (http.Server.Shutdown never cancels
+	// in-flight request contexts), then drain in-flight tool calls so long
+	// tasks receive their responses, then release durable resources.
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.ListenAndServe() }()
 	stop := make(chan os.Signal, 1)
@@ -440,6 +452,9 @@ func (r *Runtime) Start() error {
 		return err
 	case <-stop:
 		log.Info("shutdown", "reason", "signal", "grace_period", shutdownGracePeriod.String())
+		if r.observation != nil && r.observation.broker != nil {
+			r.observation.broker.Close()
+		}
 		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownGracePeriod)
 		defer cancelShutdown()
 		_ = srv.Shutdown(shutdownCtx)
@@ -456,7 +471,9 @@ func (r *Runtime) Close() error {
 	r.closeOnce.Do(func() {
 		r.stopRetention()
 		if r.observation != nil && r.observation.async != nil {
-			r.observation.async.Close(2 * time.Second)
+			// 0 selects the recorder's default drain floor (5s): a full queue
+			// needs the longer window to flush through SQLite.
+			r.observation.async.Close(0)
 		}
 		if r.observerSocket != nil {
 			if err := r.observerSocket.Close(); err != nil {
@@ -474,6 +491,9 @@ func (r *Runtime) Close() error {
 		if r.tasks != nil {
 			r.tasks.Close()
 		}
+		// Give detached replay persistence a short bounded window before the
+		// database closes; each write already carries its own timeout.
+		waitReplayPersist(&r.replayPersistWG, toolReplayPersistTimeout)
 		if r.state != nil {
 			if err := r.state.Close(); r.closeErr == nil {
 				r.closeErr = err
@@ -481,6 +501,21 @@ func (r *Runtime) Close() error {
 		}
 	})
 	return r.closeErr
+}
+
+// waitReplayPersist waits for detached replay writes with a bounded window so
+// shutdown never hangs on a stalled SQLite write.
+func waitReplayPersist(wg *sync.WaitGroup, timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		logging.With("component", "tool_replay").Warn("replay persistence drain timed out")
+	}
 }
 
 func (r *Runtime) startRetention() {

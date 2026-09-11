@@ -4,13 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"mcpx/internal/arc"
+	"mcpx/internal/envelope"
 	"mcpx/internal/mcpresult"
+	"mcpx/internal/remotesession"
+	"mcpx/internal/terminal"
 )
 
 func assertToolFailureWire(t *testing.T, result *mcp.CallToolResult, code string) {
@@ -160,5 +164,88 @@ func TestUpstreamErrorHintIsNotDuplicated(t *testing.T) {
 	}
 	if result.StructuredContent.(map[string]any)["partial"] != true {
 		t.Fatal("upstream data lost")
+	}
+}
+
+// The response deadline must not kill the worker: after TOOL_TIMEOUT the late
+// worker still records its outcome, and an identical retry replays it instead
+// of re-executing the side effects.
+func TestBoundedToolLateWorkerOutcomeReplayable(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "demo")
+	sid := consoleRemote(t, rt, "demo")
+	var executions int32
+	release := make(chan struct{})
+	workerExited := make(chan struct{})
+	handler := rt.boundedTool("late_fixture", rt.instrumentTool("late_fixture", func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		atomic.AddInt32(&executions, 1)
+		defer close(workerExited)
+		<-release
+		return mcpresult.NewText("late completion"), nil
+	}), 40*time.Millisecond)
+	args := map[string]any{"remote_session_id": sid, "command": "make check"}
+	first, err := handler(context.Background(), mcpresult.Request(args))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertToolFailureWire(t, first, "TOOL_TIMEOUT")
+	close(release)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&executions) == 1 && len(rt.toolResponseSlots) == 0 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if atomic.LoadInt32(&executions) != 1 || len(rt.toolResponseSlots) != 0 {
+		t.Fatalf("late worker did not finish bookkeeping: executions=%d slots=%d", executions, len(rt.toolResponseSlots))
+	}
+	replayed, err := handler(context.Background(), mcpresult.Request(args))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.IsError {
+		t.Fatalf("recorded late completion must replay as success: %+v", replayed)
+	}
+	if value, _ := replayed.Meta["replayed"].(bool); !value {
+		t.Fatalf("replayed marker missing: %+v", replayed.Meta)
+	}
+	if reason, _ := replayed.Meta["replay_reason"].(string); reason != "prior attempt already completed" {
+		t.Fatalf("replay_reason = %q, want prior attempt already completed", reason)
+	}
+	if atomic.LoadInt32(&executions) != 1 {
+		t.Fatalf("replay re-executed the tool body: %d executions", executions)
+	}
+}
+
+// A restart-interrupted execution Task must surface as an explicit error
+// envelope (with a re-run next_action), never as a success envelope.
+func TestInterruptedTaskOutcomeIsErrorEnvelope(t *testing.T) {
+	rt := &Runtime{}
+	data := map[string]any{"status": string(terminal.TaskInterrupted), "command": "make check", "execution_task_id": "task-1"}
+	code, message := annotateExecutionOutcome(data)
+	if code != "EXECUTION_INTERRUPTED" || data["outcome"] != "interrupted" || data["error_code"] != "EXECUTION_INTERRUPTED" {
+		t.Fatalf("interrupted annotation = %q data=%+v", code, data)
+	}
+	result, err := rt.executionOutcomeFailure(envelope.Request{RequestID: "req-interrupted"},
+		remotesession.Session{ID: "sess-1", WorkspaceName: "demo"}, data, code, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatalf("interrupted Task must produce an error envelope: %+v", result)
+	}
+	wire, _ := result.StructuredContent.(map[string]any)
+	body, _ := wire["error"].(map[string]any)
+	if body["code"] != "EXECUTION_INTERRUPTED" {
+		t.Fatalf("error code = %v", body["code"])
+	}
+	envelopeData, _ := wire["data"].(map[string]any)
+	next, _ := envelopeData["next_action"].(map[string]any)
+	if next["tool"] != "execute" {
+		t.Fatalf("interrupted next_action must guide a re-run: %+v", next)
+	}
+	arguments, _ := next["arguments"].(map[string]any)
+	if arguments["action"] != "run" || arguments["command"] != "make check" {
+		t.Fatalf("interrupted re-run arguments = %+v", arguments)
 	}
 }

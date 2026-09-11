@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -112,4 +113,23 @@ func TestEnvelopeFailureSetsMCPErrorFlag(t *testing.T) {
 	if err != nil || pending == nil || pending.IsError {
 		t.Fatalf("pending approval must not masquerade as execution failure: %+v %v", pending, err)
 	}
+}
+
+// A handler error that hides the sentinel behind a non-%w format verb must
+// still be classified from the execution context state instead of degrading
+// to TOOL_EXECUTION_FAILED.
+func TestNormalizeToolOutcomeClassifiesByContextState(t *testing.T) {
+	req := mcpresult.Request(map[string]any{"remote_session_id": "sess-failure"})
+	timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), -time.Second)
+	defer timeoutCancel()
+	result := ensureToolResponse(timeoutCtx, "classify_fixture", req, nil, fmt.Errorf("worker gave up: %v", context.DeadlineExceeded))
+	assertToolFailureWire(t, result, "TOOL_TIMEOUT")
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result = ensureToolResponse(canceledCtx, "classify_fixture", req, nil, fmt.Errorf("worker aborted: %v", context.Canceled))
+	assertToolFailureWire(t, result, "TOOL_CANCELLED")
+
+	wrapped := ensureToolResponse(context.Background(), "classify_fixture", req, nil, fmt.Errorf("worker gave up: %w", context.DeadlineExceeded))
+	assertToolFailureWire(t, wrapped, "TOOL_TIMEOUT")
 }

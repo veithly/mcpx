@@ -72,8 +72,22 @@ func (g *Gateway) Handler() http.Handler {
 	return mux
 }
 
+// mcpMaxRequestBytes caps the /mcp request body (JSON-RPC payloads with tool
+// arguments; the largest legitimate calls stay far below this). Console routes
+// keep their own tighter limit and are unaffected.
+const mcpMaxRequestBytes = 8 << 20
+
 func (g *Gateway) wrapMCP(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Reject oversized bodies before any auth or parse work: honest clients
+		// are cut off by Content-Length, chunked bodies by MaxBytesReader.
+		if r.ContentLength > mcpMaxRequestBytes {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, mcpMaxRequestBytes)
+		}
 		mode := config.EffectiveAuthMode(g.cfg.Auth)
 		origin := g.origin(r)
 		issuer := origin

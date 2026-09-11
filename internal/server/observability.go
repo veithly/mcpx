@@ -132,6 +132,12 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 		ctx, _ = ensureRuntimeContext(ctx, mcpresult.Header(req), time.Now())
 		resultCtx := ctx
 		clientCtx := ctx
+		if attached, ok := clientContextFrom(ctx); ok {
+			// boundedTool detached this worker from the client connection and
+			// from the response deadline; the stashed context still reports a
+			// real disconnect for the interrupted marker.
+			clientCtx = attached
+		}
 		var replayEntry *replayEntry
 		var observationRequest envelope.Request
 		var observedArguments map[string]any
@@ -147,7 +153,7 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 			result = ensureToolResponse(resultCtx, name, req, result, err)
 			err = nil // SDK must receive the tool result, not discard it for a Go error.
 			if replayEntry != nil {
-				r.toolReplayFinish(replayEntry, result, clientCtx.Err() != nil)
+				r.toolReplayFinish(resultCtx, replayEntry, result, clientCtx.Err() != nil)
 			}
 			if r.observation != nil && result != nil {
 				if observationRequest.RequestID == "" {
@@ -179,12 +185,9 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 		operatorAcks := mcpresult.Arguments(req)["acknowledge_requests"]
 		req = withoutOperatorAcks(req)
 		received := time.Now()
-		// A dropped client must not cancel execution, but the bounded tool
-		// deadline still must reach the handler. context.WithoutCancel
-		// alone also removes the deadline and can leave a worker running
-		// forever after the response has timed out.
-		ctx, releaseDeadline := withoutCancelPreservingDeadline(ctx)
-		defer releaseDeadline()
+		// Execution detachment is owned by boundedTool: its worker context
+		// already survives a dropped client and carries only the worker hard
+		// limit, so nothing here may re-introduce the response deadline.
 		callCtx, runtime := ensureRuntimeContext(ctx, mcpresult.Header(req), received)
 		runtime.StartedAtMs = toolRequestStartedAtMs(req, received)
 		clientName, clientVersion := clientInfoFromContext(callCtx)
@@ -205,14 +208,6 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 		observationRequest, observationParseErr = r.parseEnv(callCtx, req)
 		arguments := mcpresult.Arguments(req)
 		observedArguments = observationArguments(name, arguments)
-		if !internalOperationStep && observationParseErr == nil {
-			if delivered, ok := r.replayDeliver(clientCtx, name, arguments); ok {
-				result = delivered
-				err = nil
-				return result, err
-			}
-			replayEntry = r.toolReplays.begin(r.toolReplayKey(name, arguments))
-		}
 		var embeddedActivityErr error
 		if observationParseErr == nil {
 			release, admissionErr := r.beginConsoleCall(callCtx, observationRequest)
@@ -221,11 +216,24 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 			}
 			defer release()
 		}
+		// Operator acknowledgements and the model's narrative activity record
+		// every conversational step, even when the effectful body is then
+		// served from the replay cache; a replay must never freeze the
+		// activity stream or leave operator requests stuck as delivered.
 		if !internalOperationStep && observationParseErr == nil {
 			embeddedActivityErr = r.acknowledgeOperatorRequests(callCtx, observationRequest, operatorAcks)
 		}
 		if !internalOperationStep && observationParseErr == nil && embeddedActivityErr == nil {
 			embeddedActivityErr = r.recordEmbeddedAgentActivity(callCtx, observationRequest, runtime, received.UTC())
+		}
+		if !internalOperationStep && observationParseErr == nil && !isTransparentProxyCall(name, req) {
+			entry, delivered, replayed := r.replayDeliver(callCtx, clientCtx, name, req, operatorAcks != nil)
+			if delivered {
+				result = replayed
+				err = nil
+				return result, err
+			}
+			replayEntry = entry
 		}
 		if !internalOperationStep && observationParseErr == nil && embeddedActivityErr == nil && r.observation != nil {
 			// Activity is recorded synchronously before this async lifecycle event,

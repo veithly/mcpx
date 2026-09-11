@@ -407,9 +407,9 @@ func TestInstrumentToolReplaysResultAfterClientDisconnect(t *testing.T) {
 		t.Fatalf("completed detached call=%+v", first)
 	}
 
-	replayed, ok := rt.replayDeliver(context.Background(), "replay_disconnect", map[string]any{"remote_session_id": "sess-replay"})
-	if !ok || replayed == nil || len(replayed.Content) == 0 {
-		t.Fatalf("disconnect retry did not receive recorded result: ok=%v result=%+v", ok, replayed)
+	_, delivered, replayed := rt.replayDeliver(context.Background(), context.Background(), "replay_disconnect", mcpresult.Request(map[string]any{"remote_session_id": "sess-replay"}), false)
+	if !delivered || replayed == nil || len(replayed.Content) == 0 {
+		t.Fatalf("disconnect retry did not receive recorded result: delivered=%v result=%+v", delivered, replayed)
 	}
 	if got := replayed.Content[0].(*mcp.TextContent).Text; got != "verified latest result" {
 		t.Fatalf("replayed text=%q", got)

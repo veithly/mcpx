@@ -45,17 +45,20 @@ func TestRuntimeContextGeneratesValuesWithoutHeaders(t *testing.T) {
 	}
 }
 
-func TestWithoutCancelPreservingDeadlineDetachesCancellation(t *testing.T) {
-	parent, cancel := context.WithTimeout(context.Background(), time.Hour)
+func TestClientContextStashSurvivesDetachedWorker(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ctx, release := withoutCancelPreservingDeadline(parent)
-	defer release()
-	if _, ok := ctx.Deadline(); !ok {
-		t.Fatal("detached context lost parent deadline")
+	worker := withClientContext(context.WithoutCancel(parent), parent)
+	if _, ok := clientContextFrom(worker); !ok {
+		t.Fatal("detached worker lost the stashed client context")
+	}
+	stashed, ok := clientContextFrom(worker)
+	if !ok || stashed != parent {
+		t.Fatalf("stashed context = %v, %v", stashed, ok)
 	}
 	cancel()
-	if ctx.Err() != nil {
-		t.Fatalf("detached context inherited cancellation: %v", ctx.Err())
+	if _, ok := clientContextFrom(context.Background()); ok {
+		t.Fatal("plain contexts must not report a stashed client context")
 	}
 }
 func TestRegisteredToolSchemasExcludeClientTimestampAndServerRuntimeContext(t *testing.T) {
