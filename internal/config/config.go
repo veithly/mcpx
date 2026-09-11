@@ -188,14 +188,18 @@ func DefaultConfig() Config {
 		Transport: TransportConfig{SessionIdleTTL: "24h"},
 		Limits:    LimitsConfig{MaxResultBytes: 256 << 10},
 		State: StateConfig{Retention: RetentionConfig{
-			Enabled:             true,
-			Interval:            "24h",
+			Enabled: true,
+			// Hourly cadence keeps bounded batch deletes ahead of the write rate
+			// (each tool call writes one tool_results row plus observation events).
+			Interval:            "1h",
 			ProcessEventTTL:     "720h",
 			ProcessEventMaxRows: 10000,
 			MemoryEventTTL:      "4320h",
 			MemoryEventMaxRows:  2000,
 			TerminalTaskTTL:     "720h",
 			SnapshotTTL:         "2160h",
+			// Freelist page threshold (~40MB at 4KiB pages) above which a
+			// retention pass releases freed pages back to the filesystem.
 			VacuumThresholdRows: 10000,
 		}},
 		Security: SecurityConfig{

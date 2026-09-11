@@ -11,9 +11,11 @@ const (
 	// Keep generous so workspace observers see full model-authored notes.
 	MaxIntentBytes = 8 << 10
 	MaxEventBytes  = 64 << 10
-	// MaxFileChangeEventBytes lets durable edit observations retain the full
+	// MaxFileChangeEventBytes lets durable edit observations retain a useful
 	// diff while ordinary tool/output events keep the smaller generic budget.
-	MaxFileChangeEventBytes = 16 << 20
+	// 1MiB is 16x the generic budget; multi-MiB diff rows were a real share of
+	// state DB growth and full file content remains in file_snapshots.
+	MaxFileChangeEventBytes = 1 << 20
 	DefaultHistory          = 100
 	// MaxObserverHistory bounds initial and reconnect replay for the human
 	// terminal observer independently from broader history APIs.

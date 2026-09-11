@@ -99,6 +99,191 @@ func writeRetentionTaskLogs(t *testing.T, logDir, id string) []string {
 	return paths
 }
 
+// insertRetentionEventsBulk seeds count rows of one event type in a single
+// transaction so catch-up tests can create thousands of candidates cheaply.
+func insertRetentionEventsBulk(t *testing.T, db *sql.DB, workspace, eventType string, count int, createdAt int64) {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.Prepare(`INSERT INTO observation_events
+        (workspace_name, remote_session_id, event_type, tool_name, summary, created_at)
+        VALUES (?, '', ?, 'file_read', ?, ?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stmt.Close()
+	for i := 0; i < count; i++ {
+		if _, err := stmt.Exec(workspace, eventType, strings.Repeat("x", 512), createdAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func countRetentionEvents(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM observation_events`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+func sqliteFreelistCount(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var freelist int
+	if err := db.QueryRow(`PRAGMA freelist_count`).Scan(&freelist); err != nil {
+		t.Fatal(err)
+	}
+	return freelist
+}
+
+func TestRetentionCatchUpDeletesBeyondOneBatchPerPass(t *testing.T) {
+	db, service, now := newRetentionTestService(t, "")
+	service.policy.ProcessEventMaxRows = 5
+	service.policy.MemoryEventMaxRows = 5
+
+	old := now.Add(-2 * time.Hour).UnixMilli()
+	recent := now.Add(-10 * time.Minute).UnixMilli()
+	insertRetentionEventsBulk(t, db, "demo", "tool.started", 1100, old)
+	for i := 0; i < 5; i++ {
+		insertRetentionEvent(t, db, "demo", "", "tool.started", "file_read", recent+int64(i))
+	}
+
+	report, err := service.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Errors) != 0 {
+		t.Fatalf("errors=%v", report.Errors)
+	}
+	if report.DeletedObservationEvents != 1100 {
+		t.Fatalf("deleted=%d, want 1100 (catch-up must exceed one 500-row batch); report=%+v", report.DeletedObservationEvents, report)
+	}
+	if remaining := countRetentionEvents(t, db); remaining != 5 {
+		t.Fatalf("remaining=%d, want 5 (newest-window events)", remaining)
+	}
+}
+
+func TestRetentionStopsAtPerPassBatchQuota(t *testing.T) {
+	originalBatches := retentionMaxBatches
+	retentionMaxBatches = 2
+	defer func() { retentionMaxBatches = originalBatches }()
+
+	db, service, now := newRetentionTestService(t, "")
+	service.policy.ProcessEventMaxRows = 5
+	service.policy.MemoryEventMaxRows = 5
+
+	old := now.Add(-2 * time.Hour).UnixMilli()
+	insertRetentionEventsBulk(t, db, "demo", "tool.started", 1200, old)
+
+	report, err := service.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The newest-window keeps 5 of the 1200 rows, so 1195 are candidates and
+	// two batches delete at most 1000 in this pass.
+	if report.DeletedObservationEvents != 1000 {
+		t.Fatalf("deleted=%d, want 1000 (2 batches x 500); report=%+v", report.DeletedObservationEvents, report)
+	}
+	if remaining := countRetentionEvents(t, db); remaining != 200 {
+		t.Fatalf("remaining=%d, want 200 (quota stop)", remaining)
+	}
+}
+
+func TestObservationRetentionActivityPredicate(t *testing.T) {
+	predicate, err := observationPredicate("activity", "e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, eventType := range []string{
+		"agent.activity", "operation.started", "operation.step.started", "operation.step.completed", "operation.completed",
+	} {
+		if !strings.Contains(predicate, "'"+eventType+"'") {
+			t.Fatalf("activity predicate misses %q: %s", eventType, predicate)
+		}
+	}
+	if _, err := observationPredicate("bogus", "e"); err == nil {
+		t.Fatal("unknown category must be rejected")
+	}
+}
+
+func TestRetentionExpiresAgentActivityAndOperationEvents(t *testing.T) {
+	db, service, now := newRetentionTestService(t, "")
+	insertRetentionPrincipal(t, db, "principal")
+	service.policy.ProcessEventMaxRows = 100
+
+	old := now.Add(-2 * time.Hour).UnixMilli()
+	recent := now.Add(-10 * time.Minute).UnixMilli()
+	var oldSequences, recentSequences []int64
+	for _, eventType := range []string{
+		"agent.activity", "operation.started", "operation.step.started", "operation.step.completed", "operation.completed",
+	} {
+		oldSequences = append(oldSequences, insertRetentionEvent(t, db, "demo", "session", eventType, "", old))
+		recentSequences = append(recentSequences, insertRetentionEvent(t, db, "demo", "session", eventType, "", recent))
+	}
+
+	report, err := service.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Errors) != 0 {
+		t.Fatalf("errors=%v", report.Errors)
+	}
+	if report.DeletedObservationEvents != len(oldSequences) {
+		t.Fatalf("deleted=%d, want %d; report=%+v", report.DeletedObservationEvents, len(oldSequences), report)
+	}
+	for _, sequence := range oldSequences {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM observation_events WHERE sequence = ?`, sequence).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("expired activity event %d remains", sequence)
+		}
+	}
+	for _, sequence := range recentSequences {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM observation_events WHERE sequence = ?`, sequence).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("recent activity event %d was deleted", sequence)
+		}
+	}
+}
+
+func TestRetentionIsolatesCategoryErrors(t *testing.T) {
+	db, service, now := newRetentionTestService(t, "")
+	old := now.Add(-2 * time.Hour).UnixMilli()
+	if _, err := db.Exec(`DROP TABLE observation_events`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := db.Exec(`INSERT INTO tool_results
+		(request_id, workspace_name, remote_session_id, tool_name, status, result_json, created_at, updated_at)
+		VALUES ('old-result', 'demo', 'session', 'execute', 'succeeded', '{}', ?, ?)`, old, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := service.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("one broken category must not fail the pass: %v", err)
+	}
+	if report.DeletedToolResults != 1 {
+		t.Fatalf("deleted tool results=%d, want 1; report=%+v", report.DeletedToolResults, report)
+	}
+	// process, memory and activity categories each report their own failure.
+	if len(report.Errors) < 3 {
+		t.Fatalf("errors=%v, want one per observation category", report.Errors)
+	}
+}
+
 func TestObservationRetentionTreatsProgressAsMemory(t *testing.T) {
 	process, err := observationPredicate("process", "e")
 	if err != nil {
@@ -519,5 +704,128 @@ func TestRetentionDeletesFinishedTasksFromOpenSessions(t *testing.T) {
 				t.Fatalf("removed task log %q still exists: %v", path, err)
 			}
 		}
+	}
+}
+
+// growFreelist seeds fat rows and deletes most of them so the database holds
+// free pages even though rows were removed.
+func growFreelist(t *testing.T, db *sql.DB, seed, remove int) {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.Prepare(`INSERT INTO observation_events
+		(workspace_name, remote_session_id, event_type, tool_name, summary, created_at)
+		VALUES ('demo', '', 'tool.started', 'file_read', ?, ?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stmt.Close()
+	for i := 0; i < seed; i++ {
+		if _, err := stmt.Exec(strings.Repeat("x", 512), 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM observation_events WHERE rowid IN
+		(SELECT rowid FROM observation_events ORDER BY rowid LIMIT ?)`, remove); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRetentionVacuumsIncrementalWhenFreelistExceedsThreshold(t *testing.T) {
+	db, service, _ := newRetentionTestService(t, "")
+	service.policy.VacuumThresholdRows = 8
+
+	growFreelist(t, db, 500, 450)
+	before := sqliteFreelistCount(t, db)
+	if before <= 8 {
+		t.Fatalf("fixture freelist=%d, want > 8", before)
+	}
+
+	report, err := service.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Errors) != 0 {
+		t.Fatalf("errors=%v", report.Errors)
+	}
+	if !report.Vacuumed {
+		t.Fatalf("incremental vacuum did not run; freelist before=%d report=%+v", before, report)
+	}
+	if after := sqliteFreelistCount(t, db); after > 8 {
+		t.Fatalf("freelist after=%d, want <= 8", after)
+	}
+}
+
+func TestRetentionLegacyDatabaseOnlyTruncatesWAL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=auto_vacuum(NONE)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if err := applyMigrations(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var autoVacuum int
+	if err := db.QueryRow(`PRAGMA auto_vacuum`).Scan(&autoVacuum); err != nil {
+		t.Fatal(err)
+	}
+	if autoVacuum != 0 {
+		t.Fatalf("fixture auto_vacuum=%d, want 0 (legacy)", autoVacuum)
+	}
+
+	growFreelist(t, db, 500, 450)
+	before := sqliteFreelistCount(t, db)
+	if before <= 0 {
+		t.Fatalf("fixture freelist=%d, want > 0", before)
+	}
+
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	service, err := NewRetentionService(db, "", config.RetentionConfig{
+		Enabled:             true,
+		Interval:            "1h",
+		ProcessEventTTL:     "1h",
+		ProcessEventMaxRows: 5,
+		MemoryEventTTL:      "1h",
+		MemoryEventMaxRows:  5,
+		TerminalTaskTTL:     "1h",
+		SnapshotTTL:         "1h",
+		VacuumThresholdRows: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return now }
+
+	report, err := service.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Errors) != 0 {
+		t.Fatalf("errors=%v", report.Errors)
+	}
+	if report.Vacuumed {
+		t.Fatal("legacy database must not report incremental vacuum")
+	}
+	if after := sqliteFreelistCount(t, db); after <= 0 {
+		t.Fatal("legacy database freelist was reclaimed without a rebuild")
+	}
+}
+
+func TestNewDatabasesEnableIncrementalAutoVacuum(t *testing.T) {
+	db, _, _ := newRetentionTestService(t, "")
+	var autoVacuum int
+	if err := db.QueryRow(`PRAGMA auto_vacuum`).Scan(&autoVacuum); err != nil {
+		t.Fatal(err)
+	}
+	if autoVacuum != 2 {
+		t.Fatalf("auto_vacuum=%d, want 2 (INCREMENTAL)", autoVacuum)
 	}
 }

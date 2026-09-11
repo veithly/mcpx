@@ -471,6 +471,18 @@ var migrations = []string{
         ON tool_results(workspace_name, remote_session_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_tool_results_operation
         ON tool_results(operation_id, step_id, updated_at DESC);`,
+	`ALTER TABLE tool_results ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0;`,
+	`CREATE TABLE IF NOT EXISTS tool_replays (
+        replay_digest TEXT PRIMARY KEY,
+        remote_session_id TEXT NOT NULL DEFAULT '',
+        workspace_name TEXT NOT NULL DEFAULT '',
+        tool_name TEXT NOT NULL DEFAULT '',
+        result_json TEXT NOT NULL,
+        interrupted INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_tool_replays_created
+        ON tool_replays(created_at);`,
 }
 
 func applyMigrations(ctx context.Context, db *sql.DB) error {

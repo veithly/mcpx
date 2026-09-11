@@ -22,12 +22,18 @@ type Store struct {
 // pooled connection, not just the first one. _txlock=immediate makes writers
 // queue politely under busy_timeout instead of failing fast with SQLITE_BUSY
 // when a deferred transaction upgrades mid-flight under concurrency.
+// auto_vacuum=INCREMENTAL lets retention release freed pages via
+// incremental_vacuum; on existing databases created before this pragma it is
+// a silent no-op and those databases keep the legacy checkpoint-only path.
 func sqliteDSN(path string) string {
 	query := url.Values{}
 	query.Add("_txlock", "immediate")
 	query.Add("_pragma", "journal_mode(WAL)")
+	query.Add("_pragma", "auto_vacuum(INCREMENTAL)")
 	query.Add("_pragma", "foreign_keys(ON)")
-	query.Add("_pragma", "busy_timeout(3000)")
+	// Deliberately below the observation write timeout so a contended lock
+	// waits, then fails, while the caller still has budget to retry.
+	query.Add("_pragma", "busy_timeout(1500)")
 	query.Add("_pragma", "synchronous(NORMAL)")
 	return "file:" + path + "?" + query.Encode()
 }

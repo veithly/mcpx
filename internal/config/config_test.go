@@ -26,7 +26,7 @@ func TestDefaultConfigUsesTransportSessionTTL(t *testing.T) {
 func TestDefaultConfigUsesStateRetentionDefaults(t *testing.T) {
 	cfg := DefaultConfig()
 	retention := cfg.State.Retention
-	if !retention.Enabled || retention.Interval != "24h" {
+	if !retention.Enabled || retention.Interval != "1h" {
 		t.Fatalf("retention enabled/interval: %+v", retention)
 	}
 	if retention.ProcessEventTTL != "720h" || retention.ProcessEventMaxRows != 10000 {
