@@ -273,6 +273,31 @@ func isTransparentProxyCall(name string, req *mcp.CallToolRequest) bool {
 	return name == "mcp_tool" && toolAction(req) == "call"
 }
 
+// isLiveToolQuery keeps current-state reads out of the effect-replay cache.
+// A repeated poll or read is a new observation, including after a restart;
+// exact historical results remain available through observe(request_ids).
+func isLiveToolQuery(name string, req *mcp.CallToolRequest) bool {
+	action := toolAction(req)
+	switch name {
+	case "read", "observe", "workspace", "environment_read", "runtime_read", "screenshot_capture":
+		return true
+	case "execute":
+		return action == "attach"
+	case "operation_manage":
+		return action == "status" || action == "wait" || action == "result"
+	case "artifact":
+		return action == "list" || action == "read"
+	case "plan":
+		return action == "read"
+	case "skill_tool", "mcp_tool":
+		return action == "list" || action == "describe"
+	case "session":
+		return action == "list" || ((action == "" || action == "open") && stringPayload(mcpresult.Arguments(req), "remote_session_id") != "")
+	default:
+		return false
+	}
+}
+
 // replayDeliver resolves an identical retry of a previous attempt. It returns
 // the entry this caller must finish (only when it registered a fresh one) plus
 // delivered=true with a result that must be returned without executing:
@@ -283,6 +308,9 @@ func isTransparentProxyCall(name string, req *mcp.CallToolRequest) bool {
 // requests: it is a new conversational step, so it always executes and
 // re-records the identity.
 func (r *Runtime) replayDeliver(ctx, clientCtx context.Context, name string, req *mcp.CallToolRequest, acknowledges bool) (entry *replayEntry, delivered bool, result *mcp.CallToolResult) {
+	if isLiveToolQuery(name, req) {
+		return nil, false, nil
+	}
 	arguments := mcpresult.Arguments(req)
 	key := r.toolReplayKey(name, arguments)
 	if strings.TrimSpace(stringPayload(arguments, "idempotency_key")) != "" {

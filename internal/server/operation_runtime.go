@@ -146,6 +146,7 @@ func (r *Runtime) waitForOperationTask(ctx context.Context, input operation.Exec
 	data["completed_in_call"] = true
 	data["operation_waited"] = true
 	capTaskExecutionOutput(data, 256<<10)
+	setTaskLogContinuation(data, input.RemoteSessionID)
 	exitCode, hasExitCode := data["exit_code"].(int)
 	if task.Status != terminal.TaskExited || !hasExitCode || exitCode != 0 {
 		code := "EXECUTION_FAILED"

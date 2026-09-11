@@ -24,7 +24,10 @@ func (r *Runtime) toolExecute(ctx context.Context, req *mcp.CallToolRequest) (*m
 			return r.withCleanIdempotency(ctx, req, "execute", mcpresult.Arguments(req), r.toolCommandExecute)
 		}
 		return r.toolCommandExecute(ctx, req)
-	case "attach", "stop", "stdin":
+	case "attach":
+		// Waiting/reading is a live query, not an effect to replay by idempotency key.
+		return r.toolTaskManage(ctx, forwardedRequest(req, map[string]any{"action": action}))
+	case "stop", "stdin":
 		forwarded := forwardedRequest(req, map[string]any{"action": action})
 		return r.withCleanIdempotency(ctx, forwarded, "execute", mcpresult.Arguments(req), r.toolTaskManage)
 	default:

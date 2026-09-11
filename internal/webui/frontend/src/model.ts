@@ -64,6 +64,11 @@ function diffTextsOf(event: Activity): { diffs: string[]; paths: string[] } {
   if (event.path && !paths.includes(event.path)) paths.unshift(event.path);
   return { diffs, paths };
 }
+function isOperationProtocolNoise(event: Activity): boolean {
+  if (event.type === 'operation.started' || event.type === 'operation.step.started' || event.type === 'operation.step.completed') return true;
+  if (event.type !== 'operation.completed') return false;
+  return !['failed', 'error', 'cancelled', 'canceled', 'interrupted'].includes(event.status || '');
+}
 export function timelineEntries(events: Activity[]): Activity[] {
   const outputs = new Map<string, ActivityOutput[]>();
   const changes = new Map<string, { diffs: string[]; paths: string[] }>();
@@ -82,6 +87,7 @@ export function timelineEntries(events: Activity[]): Activity[] {
   const byCall = new Map<string, number>(); const out: Activity[] = [];
   let orphanTask = ''; let orphanRow = -1;
   for (const event of events) {
+    if (isOperationProtocolNoise(event)) continue;
     if (event.type === 'command.output') {
       if (event.call_id && cardCalls.has(event.call_id)) continue;
       // Chunks whose parent card is outside the loaded window group into one
@@ -174,6 +180,29 @@ export function countDiffChanges(diffs: string[]): { added: number; removed: num
     else if (line.kind === 'del') removed++;
   }
   return { added, removed };
+}
+export function describeReadTargets(input: unknown): string[] {
+  const value = input as { path?: unknown; paths?: unknown; items?: unknown } | null;
+  const targets: string[] = [];
+  const add = (candidate: unknown) => {
+    if (typeof candidate === 'string' && candidate.trim() && !targets.includes(candidate)) targets.push(candidate);
+  };
+  add(value?.path);
+  if (Array.isArray(value?.paths)) for (const path of value.paths) add(path);
+  if (Array.isArray(value?.items)) for (const item of value.items as { path?: unknown }[]) add(item?.path);
+  return targets;
+}
+export function describeReadTitle(input: unknown): string {
+  const value = input as { view?: unknown; query?: unknown } | null;
+  const targets = describeReadTargets(input);
+  if (value?.view === 'search' || value?.view === 'context') {
+    const query = typeof value.query === 'string' ? value.query.trim() : '';
+    return query ? `搜索 · ${query.length > 48 ? query.slice(0, 48) + '…' : query}` : '搜索文件';
+  }
+  if (value?.view === 'list') return targets[0] ? `浏览目录 · ${targets[0]}` : '浏览目录';
+  if (targets.length === 1) return `读取 · ${targets[0]}`;
+  if (targets.length > 1) return `读取 ${targets.length} 个文件`;
+  return '读取文件';
 }
 export function describeEdits(input: unknown): string[] {
   const edits = (input as { edits?: unknown } | null)?.edits;

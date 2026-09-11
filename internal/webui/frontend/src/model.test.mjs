@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeEvents, timelineEntries, plainTerminal, duration, parseCommandSummary, extractDiffBlocks, parseDiff, countDiffChanges, toolTitle, summaryOf, stripContext } from './model.ts';
+import { mergeEvents, timelineEntries, plainTerminal, duration, parseCommandSummary, extractDiffBlocks, parseDiff, countDiffChanges, toolTitle, summaryOf, stripContext, describeReadTargets, describeReadTitle } from './model.ts';
 const event = (sequence, rest = {}) => ({ sequence, workspace: 'test', type: 'agent.activity', created_at: '2026-09-06T10:00:00Z', ...rest });
 test('SSE replay is deduplicated and ordered', () => {
   assert.deepEqual(mergeEvents([event(3), event(1)], [event(2), event(3, { summary: 'new' })]).map(item => [item.sequence, item.summary]), [[1, undefined], [2, undefined], [3, 'new']]);
@@ -11,6 +11,32 @@ test('long-running sessions keep a bounded event buffer', () => {
 test('tool completion updates the matching start, not another tool', () => {
   const entries = timelineEntries([event(1, { type: 'tool.started', call_id: 'a', input: { path: 'src' } }), event(2, { type: 'tool.started', call_id: 'b' }), event(3, { type: 'tool.completed', call_id: 'a', status: 'succeeded' })]);
   assert.equal(entries.length, 2); assert.equal(entries[0].status, 'succeeded'); assert.deepEqual(entries[0].input, { path: 'src' }); assert.equal(entries[1].call_id, 'b');
+});
+test('operation lifecycle noise is hidden while real child tool cards remain', () => {
+  const entries = timelineEntries([
+    event(1, { type: 'operation.started', operation_id: 'op-1', status: 'running', summary: 'operation queued' }),
+    event(2, { type: 'operation.step.started', operation_id: 'op-1', step_id: 'read-a', tool: 'read', status: 'running', summary: 'operation step started' }),
+    event(3, { type: 'tool.started', call_id: 'req-read', operation_id: 'op-1', step_id: 'read-a', tool: 'read', input: { items: [{ path: 'src/a.ts' }, { path: 'src/b.ts' }] } }),
+    event(4, { type: 'tool.completed', call_id: 'req-read', operation_id: 'op-1', step_id: 'read-a', tool: 'read', status: 'succeeded' }),
+    event(5, { type: 'operation.step.completed', operation_id: 'op-1', step_id: 'read-a', tool: 'read', status: 'succeeded', summary: 'operation step succeeded' }),
+    event(6, { type: 'operation.completed', operation_id: 'op-1', status: 'succeeded', summary: 'operation succeeded' }),
+  ]);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].type, 'tool.completed');
+  assert.deepEqual(entries[0].input, { items: [{ path: 'src/a.ts' }, { path: 'src/b.ts' }] });
+});
+test('failed operation completion is still visible', () => {
+  const entries = timelineEntries([event(1, { type: 'operation.completed', operation_id: 'op-1', status: 'failed', summary: 'operation failed' })]);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].status, 'failed');
+});
+test('read descriptions expose concrete files and search intent', () => {
+  const input = { items: [{ path: 'src/a.ts' }, { path: 'src/b.ts' }, { path: 'src/a.ts' }] };
+  assert.deepEqual(describeReadTargets(input), ['src/a.ts', 'src/b.ts']);
+  assert.equal(describeReadTitle(input), '读取 2 个文件');
+  assert.equal(describeReadTitle({ view: 'file', path: 'src/model.ts' }), '读取 · src/model.ts');
+  assert.equal(describeReadTitle({ view: 'search', paths: ['internal'], query: 'operation step' }), '搜索 · operation step');
+  assert.equal(describeReadTitle({ view: 'list', path: 'internal/webui' }), '浏览目录 · internal/webui');
 });
 test('command output chunks merge into the owning tool card', () => {
   const entries = timelineEntries([

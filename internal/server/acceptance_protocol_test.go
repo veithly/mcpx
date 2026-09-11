@@ -773,7 +773,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		"remote_session_id": remoteID, "command": "printf short-command", "purpose": "run the short command protocol check", "scope": "workspace",
 	})
 	shortData, _ := short["data"].(map[string]any)
-	if shortData["completed_in_call"] != true || shortData["exit_code"] != float64(0) || shortData["execution_task_id"] != nil {
+	if shortData["completed_in_call"] != true || shortData["exit_code"] != float64(0) || stringPayload(shortData, "execution_task_id") == "" {
 		t.Fatalf("short command should complete in one call: %+v", short)
 	}
 	long := call("command_execute", map[string]any{

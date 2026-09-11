@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -236,8 +237,8 @@ func historyTimePayload(payload map[string]any, key string) (time.Time, error) {
 }
 
 func parseUnixMillis(value string) (int64, error) {
-	var parsed int64
-	if _, err := fmt.Sscan(value, &parsed); err != nil || parsed <= 0 {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
 		return 0, fmt.Errorf("invalid timestamp")
 	}
 	return parsed, nil

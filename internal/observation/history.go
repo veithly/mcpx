@@ -145,7 +145,7 @@ func appendKindFilter(where *[]string, args *[]any, values []string) {
 		case "tool":
 			clauses = append(clauses, "event_type IN ('tool.started', 'tool.completed')")
 		case "command", "task":
-			clauses = append(clauses, "event_type = 'command.output' OR tool_name = 'command_run'")
+			clauses = append(clauses, "event_type = 'command.output' OR tool_name = 'execute'")
 		case "skill":
 			clauses = append(clauses, "tool_name = 'skill_tool'")
 		case "mcp":

@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { Activity as ActivityIcon, Check, ChevronRight, Eye, FileText, Globe, LoaderCircle, MessageSquare, TerminalSquare, TriangleAlert } from 'lucide-react';
-import { argsRows, countDiffChanges, describeEdits, duration, extractDiffBlocks, parseCommandSummary, parseDiff, plainTerminal, statusText, stripContext, summaryOf, timelineEntries, toolTitle } from './model';
+import { argsRows, countDiffChanges, describeEdits, describeReadTargets, describeReadTitle, duration, extractDiffBlocks, parseCommandSummary, parseDiff, plainTerminal, statusText, stripContext, summaryOf, timelineEntries, toolTitle } from './model';
 import type { Activity } from './model';
 
 const activityLabels: Record<string, string> = { intent: '工作目标', hypothesis: '待验证方向', evidence: '新发现', conclusion: '当前结论', next: '下一步', status: '工作状态' };
@@ -58,10 +58,12 @@ function ToolBody({ event, onTask }: { event: Activity; onTask: (id: string, ses
   } else {
     if (event.outputs?.length) for (const chunk of event.outputs) streams.push(chunk);
   }
+  const readTargets = event.tool === 'read' ? describeReadTargets(event.input) : [];
   const bodyText = event.tool === 'execute' ? '' : summary;
-  const showSummary = bodyText && event.tool !== 'edit';
+  const showSummary = bodyText && event.tool !== 'edit' && !(event.tool === 'read' && readTargets.length > 0 && event.status === 'succeeded');
   return <>
     {event.tool === 'execute' && event.command && <div className="cmd-row"><span className="cmd-prompt">$</span><code>{event.command}</code>{event.working_directory && <span className="cwd-chip" title={event.working_directory}>{event.working_directory.split('/').filter(Boolean).slice(-1)[0] || event.working_directory}</span>}{event.exit_code !== undefined && event.exit_code !== null && <span className={'exit-chip ' + (event.exit_code === 0 ? 'ok' : 'bad')}>exit {event.exit_code}</span>}</div>}
+    {event.tool === 'read' && readTargets.length > 0 && <div className="edit-paths">{readTargets.map(path => <span className="path-chip" key={path}>{path}</span>)}</div>}
     {event.tool === 'edit' && <div className="edit-paths">{describeEdits(event.input).map((line, index) => <span className="path-chip" key={index}>{line}</span>)}{(event.changed_paths ?? (event.path ? [event.path] : [])).map(path => <span className="path-chip" key={path}>{path}</span>)}</div>}
     {event.tool === 'mcp_tool' && argsRows(event.input).length > 0 && <div className="args-table">{argsRows(event.input).map(([key, value]) => value.trim() && <div className="args-row" key={key}><small>{key}</small><code>{value.length > 220 ? value.slice(0, 220) + '…' : value}</code></div>)}</div>}
     {note.map((line, index) => line && <p className="event-note" key={index}>{line}</p>)}
@@ -91,7 +93,7 @@ export default function Timeline({ events, hasOlder, loadingOlder, loadOlder, on
       const isActivity = !!event.activity_kind;
       const minor = isMinor(event);
       const isToolCard = event.type === 'tool.started' || event.type === 'tool.completed';
-      const title = isActivity ? activityLabels[event.activity_kind!] || event.activity_kind : event.type === 'file.changed' ? '文件变更' : toolTitle(event);
+      const title = isActivity ? activityLabels[event.activity_kind!] || event.activity_kind : event.type === 'file.changed' ? '文件变更' : event.tool === 'read' ? describeReadTitle(event.input) : toolTitle(event);
       const purpose = event.purpose || event.intent || '';
       const hasRaw = isToolCard && (!!event.input || !!event.output);
       const body = <ToolBody event={event} onTask={onTask}/>;

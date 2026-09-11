@@ -217,6 +217,7 @@ func (b *observationBridge) RecordToolCompleted(ctx context.Context, name string
 		status = responseStatus
 	}
 	facts := toolObservationFacts(name, args, result, timing)
+	executionTaskID := firstNonEmptyObservationID(facts.ExecutionTaskID, req.ExecutionTaskID)
 	summary := firstToolText(result)
 	if summary == "" {
 		summary = fmt.Sprintf("%s %s", name, status)
@@ -234,7 +235,7 @@ func (b *observationBridge) RecordToolCompleted(ctx context.Context, name string
 		NextStep:         req.NextStep,
 		PlanID:           req.PlanID,
 		PlanTaskID:       req.PlanTaskID,
-		ExecutionTaskID:  req.ExecutionTaskID,
+		ExecutionTaskID:  executionTaskID,
 		Summary:          summary,
 		Command:          facts.Command,
 		WorkingDirectory: facts.WorkingDirectory,
@@ -264,7 +265,7 @@ func (b *observationBridge) RecordToolCompleted(ctx context.Context, name string
 		NextStep:          req.NextStep,
 		PlanID:            req.PlanID,
 		PlanTaskID:        req.PlanTaskID,
-		ExecutionTaskID:   req.ExecutionTaskID,
+		ExecutionTaskID:   executionTaskID,
 		Input:             input,
 		Output:            output,
 		Summary:           fmt.Sprintf("%s %s", name, status),

@@ -293,7 +293,8 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 	capTaskExecutionOutput(data, config.MaxResultBytes(r.cfg.Limits))
 	if completed {
 		data["completed_in_call"] = true
-		delete(data, "execution_task_id")
+		// Keep the Task receipt even for short commands so logs and outcomes remain recoverable.
+		setTaskLogContinuation(data, remote.ID)
 		detail := commandExecutionDetail(purpose, scope, commandDigest, analysis)
 		detail["exit_code"] = data["exit_code"]
 		if code, message := annotateExecutionOutcome(data); code != "" {
@@ -332,6 +333,17 @@ func (r *Runtime) executeCommandTask(ctx context.Context, envReq envelope.Reques
 func commandOutputText(ctx context.Context, data map[string]any, summary string) string {
 	var builder strings.Builder
 	builder.WriteString(summary)
+	if taskID, _ := data["execution_task_id"].(string); taskID != "" {
+		fmt.Fprintf(&builder, "\nTask %s: status=%v, outcome=%v", taskID, data["status"], data["outcome"])
+		if exitCode, ok := data["exit_code"]; ok && exitCode != nil {
+			fmt.Fprintf(&builder, ", exit_code=%v", exitCode)
+		}
+		stdout, _ := data["stdout"].(string)
+		stderr, _ := data["stderr"].(string)
+		if stdout == "" && stderr == "" {
+			builder.WriteString("\nNo stdout/stderr in this chunk. Use the task outcome and exit code; a command may write its build log to a separate file.")
+		}
+	}
 	for _, stream := range []string{"stdout", "stderr"} {
 		text, _ := data[stream].(string)
 		if text == "" {
@@ -681,6 +693,7 @@ func (r *Runtime) executeRuntimeTask(ctx context.Context, envReq envelope.Reques
 
 	if completed {
 		data["completed_in_call"] = true
+		setTaskLogContinuation(data, remote.ID)
 		detail["execution_task_id"] = task.ID
 		detail["exit_code"] = data["exit_code"]
 		if reason, _ := data["limit_reason"].(string); reason != "" {
@@ -908,8 +921,23 @@ func (r *Runtime) taskResultData(task *terminal.Task, stdoutOffset, stderrOffset
 	data["stderr_offset"] = stderrOffset
 	data["stdout_next_offset"] = stdoutNext
 	data["stderr_next_offset"] = stderrNext
+	if int64(stdoutNext) < task.LogStreamSize("stdout") || int64(stderrNext) < task.LogStreamSize("stderr") {
+		data["output_truncated"] = true
+	}
 	annotateExecutionOutcome(data)
 	return data
+}
+
+// setTaskLogContinuation runs after output capping so its byte offsets point
+// after the bytes actually returned, not after the larger internal log chunk.
+func setTaskLogContinuation(data map[string]any, remoteID string) {
+	if truncated, _ := data["output_truncated"].(bool); !truncated {
+		return
+	}
+	data["next_action"] = nextAction("observe", map[string]any{
+		"remote_session_id": remoteID, "view": "logs", "execution_task_id": data["execution_task_id"],
+		"stdout_offset": data["stdout_next_offset"], "stderr_offset": data["stderr_next_offset"],
+	})
 }
 
 // annotateExecutionOutcome gives every execution Task one canonical business
