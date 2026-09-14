@@ -64,10 +64,11 @@ func TestDefaultCommandPolicyAllowsUnmatchedCommands(t *testing.T) {
 	}
 }
 
-func TestMatchCommandRejectsUnsafeOperators(t *testing.T) {
+func TestUnsafeShellSyntaxFollowsPolicyOnRawText(t *testing.T) {
 	// File-writing redirections, background operators, and command substitution
-	// cannot be split into independently judged segments and are rejected.
-	rules := config.CommandRules{}
+	// cannot be split into independently judged segments; the policy applies to
+	// the raw command text and the Unsafe flag records the limitation.
+	rules := config.CommandRules{Default: "allow"}
 	for _, command := range []string{
 		"ls > out.txt",
 		"ls >> out.txt",
@@ -78,11 +79,23 @@ func TestMatchCommandRejectsUnsafeOperators(t *testing.T) {
 		"ls `id`",
 		"echo \"`id`\"",
 		"sleep 5 &",
-		"ls\nrm -rf x",
+		"ls\nif true; then rm -rf x; fi",
 	} {
-		if got := MatchCommand(rules, command); got != Deny {
-			t.Errorf("%q: got %s, want deny", command, got)
+		analysis := AnalyzeCommand(rules, command)
+		if !analysis.Unsafe || analysis.Decision != Allow || len(analysis.Segments) != 0 {
+			t.Errorf("%q: got %+v, want allow with unsafe flag and no segments", command, analysis)
 		}
+	}
+	denyRules := config.CommandRules{Default: "allow", Deny: []string{`^ls\b`}}
+	if got := MatchCommand(denyRules, "ls > out.txt"); got != Deny {
+		t.Errorf("deny list on raw text: got %s, want deny", got)
+	}
+	confirmRules := config.CommandRules{Default: "deny", Confirm: []string{`^ls\b`}}
+	if got := MatchCommand(confirmRules, "ls > out.txt"); got != Confirm {
+		t.Errorf("confirm list on raw text: got %s, want confirm", got)
+	}
+	if got := MatchCommand(config.CommandRules{}, "ls > out.txt"); got != Confirm {
+		t.Errorf("empty rules fallback: got %s, want confirm", got)
 	}
 }
 
@@ -106,9 +119,13 @@ func TestMatchCommandAuditsPipelineStagesIndependently(t *testing.T) {
 		}
 	}
 	for _, command := range []string{"ls |", "| ls", "ls || | wc -l"} {
-		if got := MatchCommand(rules, command); got != Deny {
-			t.Errorf("malformed pipeline %q: got %s, want deny", command, got)
+		analysis := AnalyzeCommand(rules, command)
+		if !analysis.Unsafe || analysis.Decision != Allow {
+			t.Errorf("malformed pipeline %q: got %+v, want unsafe allow under allow default", command, analysis)
 		}
+	}
+	if got := MatchCommand(rules, "rm -rf x |"); got != Deny {
+		t.Errorf("malformed pipeline with denied head: got %s, want deny via raw-text match", got)
 	}
 }
 
@@ -165,16 +182,22 @@ func TestMatchCommandAllowsQuotedHeredocAsFinalCompoundSegment(t *testing.T) {
 	}
 }
 
-func TestMatchCommandRejectsUnquotedOrTrailingHeredocShell(t *testing.T) {
+func TestUnquotedOrMalformedHeredocReportedUnsafeAndFollowsPolicy(t *testing.T) {
 	rules := config.DefaultConfig().Security.Commands
 	for _, command := range []string{
 		"python3 - <<PY\nprint('expanded')\nPY",
 		"python3 - <<'PY'\nprint('missing terminator')",
-		"python3 - <<'PY'\nprint('ok')\nPY\ngit status",
+		"python3 - <<'PY'\nprint('ok')\nPY\ncat > out.txt",
+		"python3 - <<'PY'\nprint('ok')\nPY\necho $(id)",
 	} {
-		if got := MatchCommand(rules, command); got != Deny {
-			t.Fatalf("unsupported heredoc %q: got %s, want deny", command, got)
+		analysis := AnalyzeCommand(rules, command)
+		if !analysis.Unsafe || analysis.Decision != Allow {
+			t.Fatalf("unsupported heredoc %q: got %+v, want unsafe allow under default config", command, analysis)
 		}
+	}
+	denyRules := config.CommandRules{Default: "allow", Deny: []string{`^python3\b`}}
+	if got := MatchCommand(denyRules, "python3 - <<PY\nprint('expanded')\nPY"); got != Deny {
+		t.Fatalf("deny list on raw text got %s, want deny", got)
 	}
 }
 
@@ -236,12 +259,17 @@ func TestAnalyzeCommandPreservesConditionalOperatorsAndDecisions(t *testing.T) {
 	}
 }
 
-func TestMatchCommandRejectsMalformedConditionalChains(t *testing.T) {
+func TestMalformedConditionalChainsFollowRawTextPolicy(t *testing.T) {
 	rules := config.DefaultConfig().Security.Commands
 	for _, command := range []string{"echo ok ||", "|| echo ok", "echo ok &&", "echo ok || || echo no"} {
-		if got := MatchCommand(rules, command); got != Deny {
-			t.Errorf("malformed conditional %q: got %s, want deny", command, got)
+		analysis := AnalyzeCommand(rules, command)
+		if !analysis.Unsafe || analysis.Decision != Allow {
+			t.Errorf("malformed conditional %q: got %+v, want unsafe allow under allow default", command, analysis)
 		}
+	}
+	denyRules := config.CommandRules{Default: "allow", Deny: []string{`^echo\b`}}
+	if got := MatchCommand(denyRules, "echo ok ||"); got != Deny {
+		t.Errorf("malformed conditional with denied head: got %s, want deny via raw-text match", got)
 	}
 }
 

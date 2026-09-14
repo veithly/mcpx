@@ -48,6 +48,21 @@ CGO_ENABLED=0 go build -o bin/mcpx-server ./cmd/mcpx-server
 本地运行：先执行 `./bin/mcpx-server workspace register /path/to/project`，再执行 `./bin/mcpx-server` 启动服务；终端观测使用 `./bin/mcpx-server observe <workspace-name>`。版本：`./bin/mcpx-server -version`。
 发版：推送 `v*` 标签触发 GoReleaser（见 `.github/workflows/release.yml`、`.goreleaser.yaml`）。
 
+## 本机部署与签名（macOS 常驻服务）
+
+- 本机服务由 launchd（`com.mcpx.server`）运行 `~/.mcpx/bin/mcpx-server`；`/opt/homebrew/bin/mcpx` 是仓库 `bin/mcpx-server` 的符号链接，重建即自动更新 CLI。
+- **本机更新安装时，构建后必须立即正确签名，再拷贝与重启；顺序不可颠倒**（`go build` 会覆盖已有签名，adhoc 临时签名每次构建身份都不同，会导致 macOS 反复索要屏幕录制等权限，且系统设置里找不到对应条目）：
+
+  ```bash
+  go build -o bin/mcpx-server ./cmd/mcpx-server
+  codesign --force --sign mcpx-local --identifier com.mcpx.server bin/mcpx-server
+  cp bin/mcpx-server ~/.mcpx/bin/mcpx-server
+  launchctl kickstart -k gui/$(id -u)/com.mcpx.server
+  ```
+
+- 重启前校验：`codesign -dv ~/.mcpx/bin/mcpx-server` 必须显示 `Identifier=com.mcpx.server`、`Authority=mcpx-local` 且不是 `Signature=adhoc`。
+- `mcpx-local` 证书在登录钥匙串；TCC 权限（屏幕录制、文件访问）锚定在该证书上，签名身份稳定后权限只需授权一次。
+
 ## 编码风格与命名
 
 - 使用 `gofmt`；改动保持与现有包风格一致（小写包名、导出类型 PascalCase、YAML 字段 `snake_case` tag）。

@@ -47,7 +47,7 @@ func ParseDefault(s string) Decision {
 }
 
 // CommandSegmentDecision is one independently reviewed shell segment. Operator
-// is the control operator that follows this segment (&&, ||, ;), or empty for
+// is the control operator that follows this segment (&&, ||, ;, |, newline), or empty for
 // the final segment.
 type CommandSegmentDecision struct {
 	Command  string
@@ -64,16 +64,20 @@ type CommandAnalysis struct {
 }
 
 // AnalyzeCommand splits supported compound commands before evaluating policy.
-// &&, ||, ;, and | are safe separators because each segment can be judged
-// independently before the original command is passed to the shell. Unsupported
-// shell features fail closed.
+// &&, ||, ;, |, and newlines between simple commands are supported because each
+// segment can be judged before the original command is passed to the shell. When
+// a command uses shell syntax that cannot be segmented, the deny/confirm/allow
+// lists and the default decision are applied to the raw command text instead of
+// rejecting it outright; Unsafe records that per-segment preflight was impossible.
 func AnalyzeCommand(rules config.CommandRules, command string) CommandAnalysis {
 	parsed, unsafe := commandSegments(command)
-	analysis := CommandAnalysis{Decision: Deny, Unsafe: unsafe}
-	if unsafe || len(parsed) == 0 {
-		return analysis
+	if unsafe {
+		return CommandAnalysis{Decision: matchUnparsedCommand(rules, command), Unsafe: true}
 	}
-	analysis.Decision = Allow
+	if len(parsed) == 0 {
+		return CommandAnalysis{Decision: Deny}
+	}
+	analysis := CommandAnalysis{Decision: Allow}
 	analysis.Segments = make([]CommandSegmentDecision, 0, len(parsed))
 	for _, segment := range parsed {
 		decision := matchSegment(rules, segment.Command)
@@ -115,14 +119,32 @@ func matchSegment(rules config.CommandRules, segment string) Decision {
 	return decision
 }
 
+// matchUnparsedCommand evaluates policy against the raw command text when the
+// shell syntax cannot be split into independently audited segments. List order
+// and the default fallback match matchSegment.
+func matchUnparsedCommand(rules config.CommandRules, command string) Decision {
+	if matchAny(rules.Deny, command) {
+		return Deny
+	}
+	if matchAny(rules.Confirm, command) {
+		return Confirm
+	}
+	if matchAny(rules.Allow, command) {
+		return Allow
+	}
+	return ParseDefault(rules.Default)
+}
+
 // HasUnsafeShellOperator reports active shell syntax that cannot be safely
-// preflighted. &&, ||, ;, and | are supported separators: every pipeline stage
-// is judged as an independent command. A quoted heredoc whose terminator closes
-// the command is treated as literal stdin and can be audited as one segment.
+// preflighted. &&, ||, ;, |, and newlines between simple commands are supported
+// separators: every stage is judged independently. Quoted heredocs are literal
+// stdin; commands following their terminators are audited as separate segments.
 // Redirections that cannot change a segment's behavior (/dev/null sinks, fd
 // duplication, stdin from /dev/null) are skipped by the scanner. Background
-// operators, file-writing redirections, unquoted heredocs, arbitrary multiline
-// shell, and command substitution remain rejected.
+// operators, file-writing redirections, unquoted heredocs, complex multiline
+// shell (including comments and dynamic command names), and command substitution
+// are reported as unsafe: AnalyzeCommand then applies the policy to the raw
+// command text instead of per-segment audit.
 // Operators inside quotes or escaped with a backslash are literal content.
 func HasUnsafeShellOperator(command string) bool {
 	_, unsafe := commandSegments(command)
@@ -136,15 +158,17 @@ type commandSegment struct {
 
 // commandSegments scans shell control syntax without trying to fully parse a
 // shell language. It distinguishes active operators from quoted/escaped
-// literals and preserves supported && / || / ; separators for auditing.
+// literals and preserves supported separators for auditing. Multiline input is
+// restricted to simple commands with literal command names, not shell programs.
 func commandSegments(command string) ([]commandSegment, bool) {
 	segments := make([]commandSegment, 0, 2)
 	start := 0
+	multiline := strings.Contains(command, "\n")
 	var quote byte
 	escaped := false
 	appendSegment := func(end int, operator string) bool {
 		segment := strings.TrimSpace(command[start:end])
-		if segment == "" {
+		if segment == "" || (multiline && !simpleMultilineCommandHead(segment)) {
 			return false
 		}
 		segments = append(segments, commandSegment{Command: segment, Operator: operator})
@@ -204,10 +228,12 @@ func commandSegments(command string) ([]commandSegment, bool) {
 				continue
 			}
 			if end, ok := quotedHeredocCommandEnd(command, index); ok {
-				if !appendSegment(end, "") {
+				if !appendSegment(end, "\n") {
 					return nil, true
 				}
-				return segments, false
+				start = end
+				index = end - 1
+				continue
 			}
 			return nil, true
 		case '>':
@@ -216,7 +242,20 @@ func commandSegments(command string) ([]commandSegment, bool) {
 				continue
 			}
 			return nil, true
-		case '`', '\n', '\r':
+		case '\n':
+			// Blank lines and line breaks following &&, ||, |, or ; do not
+			// introduce another command or erase a pending control operator.
+			if strings.TrimSpace(command[start:index]) != "" && !appendSegment(index, "\n") {
+				return nil, true
+			}
+			start = index + 1
+		case '#':
+			// Do not interpret quotes or operators inside shell comments as
+			// syntax that could conceal a later executable line.
+			if multiline && (index == start || command[index-1] == ' ' || command[index-1] == '\t') {
+				return nil, true
+			}
+		case '`', '\r':
 			return nil, true
 		case '$':
 			if index+1 < len(command) && command[index+1] == '(' {
@@ -239,10 +278,44 @@ func commandSegments(command string) ([]commandSegment, bool) {
 			start = index + 1
 		}
 	}
-	if quote != 0 || escaped || !appendSegment(len(command), "") {
+	if quote != 0 || escaped {
+		return nil, true
+	}
+	if strings.TrimSpace(command[start:]) == "" {
+		if len(segments) == 0 || segments[len(segments)-1].Operator != "\n" {
+			return nil, true
+		}
+		segments[len(segments)-1].Operator = ""
+	} else if !appendSegment(len(command), "") {
 		return nil, true
 	}
 	return segments, false
+}
+
+// simpleMultilineCommandHead keeps the added newline support within the existing
+// simple-command policy model. Reserved words, assignments, quoted/expanded names,
+// functions, and grouping require a full shell grammar and must fail closed.
+func simpleMultilineCommandHead(segment string) bool {
+	head := segment
+	if end := strings.IndexAny(head, " \t\r\n"); end >= 0 {
+		head = head[:end]
+	}
+	if head == "" {
+		return false
+	}
+	for _, char := range head {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || strings.ContainsRune("_./-", char) {
+			continue
+		}
+		return false
+	}
+	switch head {
+	case "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done",
+		"case", "in", "esac", "select", "function", "time", "coproc":
+		return false
+	}
+	return true
 }
 
 // benignRedirectSkip reports how many bytes the scanner may step over when
@@ -275,18 +348,29 @@ func benignRedirectSkip(command string, gt int) int {
 //	command <<'TAG'\n...literal body...\nTAG
 //	command <<"TAG"\n...literal body...\nTAG
 //
-// Quoting the delimiter disables shell expansion in the heredoc body. To keep
-// the scanner deterministic, the terminator must close the entire command;
-// arbitrary commands after the terminator still fail closed as multiline shell.
+// Quoting the delimiter disables shell expansion in the heredoc body. The end
+// includes the terminator's newline, so scanning resumes at the next command.
+// Whitespace before the quoted delimiter and <<- tab stripping are supported.
 func quotedHeredocCommandEnd(command string, operatorIndex int) (int, bool) {
 	if operatorIndex+3 >= len(command) || command[operatorIndex] != '<' || command[operatorIndex+1] != '<' {
 		return 0, false
 	}
-	quote := command[operatorIndex+2]
+	quoteIndex := operatorIndex + 2
+	stripTabs := command[quoteIndex] == '-'
+	if stripTabs {
+		quoteIndex++
+	}
+	for quoteIndex < len(command) && (command[quoteIndex] == ' ' || command[quoteIndex] == '\t') {
+		quoteIndex++
+	}
+	if quoteIndex >= len(command) {
+		return 0, false
+	}
+	quote := command[quoteIndex]
 	if quote != '\'' && quote != '"' {
 		return 0, false
 	}
-	delimiterStart := operatorIndex + 3
+	delimiterStart := quoteIndex + 1
 	delimiterEnd := delimiterStart
 	for delimiterEnd < len(command) && command[delimiterEnd] != quote {
 		if command[delimiterEnd] == '\n' || command[delimiterEnd] == '\r' {
@@ -328,11 +412,11 @@ func quotedHeredocCommandEnd(command string, operatorIndex int) (int, bool) {
 			lineEnd = len(command)
 		}
 		line := strings.TrimSuffix(command[lineStart:lineEnd], "\r")
+		if stripTabs {
+			line = strings.TrimLeft(line, "\t")
+		}
 		if line == delimiter {
-			if strings.TrimSpace(command[next:]) != "" {
-				return 0, false
-			}
-			return len(command), true
+			return next, true
 		}
 		if lineEnd == len(command) {
 			break

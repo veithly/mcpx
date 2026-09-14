@@ -113,7 +113,7 @@ func (r *Runtime) toolCommandExecute(ctx context.Context, req *mcp.CallToolReque
 		r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "command_execute", Command: command, Status: "denied", Detail: runtimeExecutionDetail(purpose, scope, commandDigest, runtimeSpec, analysis)})
 		message := "command denied by policy after auditing all command segments"
 		if containsUnsafeShellFeature(command) {
-			message += "；命令包含无法独立审计的 shell 特性。&&、||、; 和 | 都会拆分后逐段独立审计（每段都要通过策略），/dev/null 与 fd 重定向（如 2>/dev/null、2>&1）允许；带目标的文件重定向、后台 &、任意多行 shell、$() 和反引号命令替换仍会拒绝；遇到这些情况请改用可独立审计的简单命令，例如 git fetch && git rev-parse HEAD && git status。"
+			message = "command denied by policy；命令包含无法逐段审计的 shell 特性（如带目标的文件重定向、后台 &、$()、反引号命令替换，或包含注释、控制结构、动态命令名的复杂多行 shell），策略按原始命令文本整体匹配 deny/confirm/allow 列表与 default 决策，本次被 deny 规则或 deny 默认值拒绝。"
 		}
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "denied", message)
 	case security.Confirm:

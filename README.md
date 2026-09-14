@@ -282,6 +282,32 @@ limits:
 把默认决策收紧为 `confirm` 或 `deny`。公网部署同时不要使用 `auth.mode: open`，应使用 `oauth`、
 `bearer` 或 `dual`，并配置最小权限规则。
 
+命令预检支持 `&&`、`||`、`;`、`|`，以及使用 LF 换行分隔、命令名明确的简单命令列表。
+空行和 `&&` / `||` / `|` 后的换行不会跳过后续命令的审计；所有段在执行前聚合策略，任一段
+命中 `deny` 都拒绝整个请求，`confirm`、只读自动放行和默认策略仍按原优先级生效。例如：
+
+```sh
+git status
+git diff
+```
+
+带引号的 heredoc（例如 `<<'TEXT'`、`<< 'TEXT'`、`<<-'TEXT'`）作为字面量 stdin 保留在
+对应命令的审计记录中，结束标记后可继续跟随独立命令；`<<-` 支持前导制表符缩进。stdin
+是字面量不代表接收它的程序只读，程序本身仍须通过命令策略。例如：
+
+```sh
+cat << 'TEXT'
+literal input
+TEXT
+git status
+```
+
+这些语法支持不关闭审计，也不改变 full access 的权限边界。文件目标重定向、后台 `&`、
+`$()`、反引号命令替换及未加引号的 heredoc 无法逐段审计，按原始命令文本整体匹配策略。
+多行输入仅限简单命令，不支持 shell
+注释、变量赋值前缀、加引号或动态生成的命令名、`if` / `for` 等控制结构，也不把 CRLF 自动
+转换为 LF。文件变更使用 `edit`，长任务使用 `execute` 的任务管理机制。
+
 ### 项目配置
 
 项目根目录可以放置 `.mcpx.yaml`，用于覆盖项目描述、项目级安全规则、能力
@@ -575,8 +601,9 @@ absolute path、`..` 越界和中间 symlink 仍拒绝。`move_out` 在 MCP `too
 `execute` 支持用 `&&`、`||` 和 `;` 组合简单命令。服务端会在启动 shell **之前**解析全部 segment，逐段应用
 `deny` / `confirm` / `allow` 策略并记录结构化 `command_policy`；任一 segment 为 `deny` 时整条命令拒绝，
 任一 segment 为 `confirm` 时对整条冻结命令进行一次用户确认。只有全部 segment 通过，并且启用的
-preflight audit 成功写入后，原始 command 才会一次性交给 shell。管道、重定向、单个 `&`、换行、`$()`
-和反引号命令替换仍然拒绝。
+preflight audit 成功写入后，原始 command 才会一次性交给 shell。管道、换行和带引号的 heredoc 会逐段
+审计；文件重定向、单个 `&`、`$()`、反引号命令替换等无法逐段审计的语法按**原始命令文本**整体匹配
+策略（`command_policy.unsafe=true` 标记该限制），命中 `deny` 或默认 `deny`/`confirm` 时按对应决策处理。
 
 这里的“全部执行或拒绝”是**策略与审计入口的原子 gate**，不是文件系统事务或副作用回滚。shell 启动后仍保留
 原始条件语义：`a && b` 只在 `a` 成功后执行 `b`，`a || b` 只在 `a` 失败后执行 `b`；已经执行的 segment

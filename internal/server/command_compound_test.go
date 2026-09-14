@@ -52,7 +52,7 @@ func runCompoundCommand(t *testing.T, rt *Runtime, remoteID, command string) map
 func TestCompoundCommandsPreflightEverySegmentBeforeShellStart(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	rt.cfg.Security.Commands = config.CommandRules{
-		Allow:   []string{`^mkdir\b`, `^echo\b`, `^mcpx_missing_command_for_or$`},
+		Allow:   []string{`^mkdir\b`, `^echo\b`, `^cat\b`, `^mcpx_missing_command_for_or$`},
 		Deny:    []string{`^rm\b`},
 		Default: "deny",
 	}
@@ -70,6 +70,8 @@ func TestCompoundCommandsPreflightEverySegmentBeforeShellStart(t *testing.T) {
 	}{
 		{name: "and", command: "mkdir denied-and && rm -rf blocked", path: "denied-and"},
 		{name: "or", command: "mkdir denied-or || rm -rf blocked", path: "denied-or"},
+		{name: "newline", command: "mkdir denied-newline\nrm -rf blocked", path: "denied-newline"},
+		{name: "heredoc", command: "mkdir denied-heredoc <<'TEXT'\nliteral input\nTEXT\nrm -rf blocked", path: "denied-heredoc"},
 	} {
 		t.Run("deny_"+testCase.name, func(t *testing.T) {
 			response := runCompoundCommand(t, rt, remoteID, testCase.command)
@@ -103,6 +105,35 @@ func TestCompoundCommandsPreflightEverySegmentBeforeShellStart(t *testing.T) {
 	first, _ := segments[0].(map[string]any)
 	if first["operator_after"] != "&&" || first["decision"] != "allow" {
 		t.Fatalf("unexpected first segment audit: %+v", first)
+	}
+
+	for _, testCase := range []struct {
+		name    string
+		command string
+		output  string
+	}{
+		{name: "newline", command: "echo first\necho second", output: "first\nsecond\n"},
+		{name: "heredoc", command: "cat << 'TEXT'\nliteral input\nTEXT\necho after", output: "literal input\nafter\n"},
+	} {
+		t.Run("allow_"+testCase.name, func(t *testing.T) {
+			response := runCompoundCommand(t, rt, remoteID, testCase.command)
+			if response["status"] != "ok" {
+				t.Fatalf("allowed command failed: %+v", response)
+			}
+			data, _ := response["data"].(map[string]any)
+			if data["stdout"] != testCase.output {
+				t.Fatalf("shell semantics were not preserved: %+v", data)
+			}
+			policy, _ := data["command_policy"].(map[string]any)
+			segments, _ := policy["segments"].([]any)
+			if policy["all_segments_preflighted"] != true || policy["atomic_policy_gate"] != true || len(segments) != 2 {
+				t.Fatalf("missing multiline policy result: %+v", policy)
+			}
+			first, _ := segments[0].(map[string]any)
+			if first["operator_after"] != "\n" || first["decision"] != "allow" {
+				t.Fatalf("unexpected newline segment audit: %+v", first)
+			}
+		})
 	}
 
 	orResponse := runCompoundCommand(t, rt, remoteID, "mcpx_missing_command_for_or || echo fallback")

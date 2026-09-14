@@ -171,7 +171,7 @@ func TestCommandExecuteBindsPurposeAndWorkspaceScope(t *testing.T) {
 	}
 }
 
-func TestCommandDeniedExplainsUnsafeShellFeatures(t *testing.T) {
+func TestUnsafeShellCommandFollowsPolicyOnRawText(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	principal, err := rt.principalFromContext(context.Background())
 	if err != nil {
@@ -188,24 +188,45 @@ func TestCommandDeniedExplainsUnsafeShellFeatures(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := mcpresult.Request(map[string]any{
-		"intent":            "deny unsafe compound verification",
+		"intent":            "run command with shell command substitution",
 		"remote_session_id": created.Session.ID,
 		"command":           `printf '%s' "$(echo hi)"`,
-		"purpose":           "verify remote branch pointer",
+		"purpose":           "verify raw-text policy fallback",
 		"scope":             "workspace",
 	})
 
+	// Command substitution cannot be segmented; without a matching rule the
+	// configured default decision applies and the command executes.
 	result, err := rt.toolCommandExecute(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	response := decodeToolResult(t, result)
+	if response["status"] != "ok" {
+		t.Fatalf("unmatched unsafe command must follow the allow default: %+v", response)
+	}
+
+	// A deny rule matched against the raw command text denies the command and
+	// explains the raw-text matching.
+	rt.cfg.Security.Commands.Deny = append(rt.cfg.Security.Commands.Deny, `^printf\b`)
+	deniedRequest := mcpresult.Request(map[string]any{
+		"intent":            "run command with shell command substitution",
+		"remote_session_id": created.Session.ID,
+		"command":           `printf '%s' "$(echo hi)"`,
+		"purpose":           "verify raw-text deny match",
+		"scope":             "workspace",
+	})
+	result, err = rt.toolCommandExecute(context.Background(), deniedRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = decodeToolResult(t, result)
 	errorBody, _ := response["error"].(map[string]any)
 	if errorBody["code"] != "DENIED" {
-		t.Fatalf("unsafe command must be denied: %+v", response)
+		t.Fatalf("deny rule on raw text must deny: %+v", response)
 	}
 	message, _ := errorBody["message"].(string)
-	for _, phrase := range []string{"shell 特性", "简单命令", "git fetch"} {
+	for _, phrase := range []string{"shell 特性", "原始命令文本"} {
 		if !strings.Contains(message, phrase) {
 			t.Fatalf("denied message must explain %q: %s", phrase, message)
 		}
