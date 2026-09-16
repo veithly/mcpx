@@ -142,19 +142,13 @@ func TestCleanCoreMCPToolIdempotentReplayDoesNotRestartUpstream(t *testing.T) {
 		"server": "fake", "tool": "echo", "arguments": map[string]any{"value": "one"},
 		"idempotency_key": "mcp-echo-replay-1",
 	}
-	waiting := callEnvelope(t, rt.toolMCPTool, context.Background(), request)
-	if waiting["status"] != "waiting_confirmation" {
-		t.Fatalf("unannotated upstream call must require confirmation=%+v", waiting)
-	}
-	confirmedRequest := cloneMap(request)
-	confirmedRequest["user_confirmed"] = true
-	confirmed := callEnvelope(t, rt.toolMCPTool, context.Background(), confirmedRequest)
-	if !statusOK(confirmed) {
-		t.Fatalf("confirmed mcp_tool call=%+v", confirmed)
+	completed := callEnvelope(t, rt.toolMCPTool, context.Background(), request)
+	if !statusOK(completed) {
+		t.Fatalf("mcp_tool call must execute without server confirmation=%+v", completed)
 	}
 	startsAfterCall := fakeMCPStartCount(t, startLog)
 
-	replay := callEnvelope(t, rt.toolMCPTool, context.Background(), confirmedRequest)
+	replay := callEnvelope(t, rt.toolMCPTool, context.Background(), request)
 	if !statusOK(replay) || replay["data"].(map[string]any)["idempotent_replay"] != true {
 		t.Fatalf("mcp_tool idempotent replay=%+v", replay)
 	}
@@ -212,21 +206,15 @@ func TestCleanCoreMCPToolIdempotentReplaySurvivesConfigRemoval(t *testing.T) {
 				"server": "fake", "tool": "echo", "arguments": map[string]any{"value": "one"},
 				"idempotency_key": "mcp-echo-replay-config-1",
 			}
-			waiting := callEnvelope(t, rt.toolMCPTool, context.Background(), request)
-			if waiting["status"] != "waiting_confirmation" {
-				t.Fatalf("unannotated upstream call must require confirmation=%+v", waiting)
-			}
-			confirmedRequest := cloneMap(request)
-			confirmedRequest["user_confirmed"] = true
-			confirmed := callEnvelope(t, rt.toolMCPTool, context.Background(), confirmedRequest)
-			if !statusOK(confirmed) {
-				t.Fatalf("confirmed mcp_tool call=%+v", confirmed)
+			completed := callEnvelope(t, rt.toolMCPTool, context.Background(), request)
+			if !statusOK(completed) {
+				t.Fatalf("mcp_tool call must execute without server confirmation=%+v", completed)
 			}
 			startsAfterCall := fakeMCPStartCount(t, startLog)
 
 			tc.mutate(t, rt, workspace.Path)
 
-			replay := callEnvelope(t, rt.toolMCPTool, context.Background(), confirmedRequest)
+			replay := callEnvelope(t, rt.toolMCPTool, context.Background(), request)
 			if !statusOK(replay) || replay["data"].(map[string]any)["idempotent_replay"] != true {
 				t.Fatalf("mcp_tool idempotent replay after config change=%+v", replay)
 			}
@@ -238,7 +226,6 @@ func TestCleanCoreMCPToolIdempotentReplaySurvivesConfigRemoval(t *testing.T) {
 			// environment: the removed/disabled server is not reachable.
 			fresh := cloneMap(request)
 			fresh["idempotency_key"] = "mcp-echo-fresh-config-2"
-			fresh["user_confirmed"] = true
 			changed := callEnvelope(t, rt.toolMCPTool, context.Background(), fresh)
 			if statusOK(changed) {
 				t.Fatalf("fresh call after config change must fail: %+v", changed)
@@ -271,14 +258,6 @@ func TestCleanCoreMCPToolConcurrentSameKeyRunsSingleUpstream(t *testing.T) {
 		"server": "fake", "tool": "echo", "arguments": map[string]any{"value": "one"},
 		"idempotency_key": "mcp-echo-concurrent-1",
 	}
-	// Establish the approval pending first: an unconfirmed call surfaces the
-	// confirmation gate, and only a user-confirmed retry may execute.
-	waiting := callEnvelope(t, rt.toolMCPTool, context.Background(), request)
-	if waiting["status"] != "waiting_confirmation" {
-		t.Fatalf("unannotated upstream call must require confirmation=%+v", waiting)
-	}
-	confirmedRequest := cloneMap(request)
-	confirmedRequest["user_confirmed"] = true
 	before := fakeMCPStartCount(t, startLog)
 	raw := make([]*mcp.CallToolResult, 2)
 	errs := make([]error, 2)
@@ -287,7 +266,7 @@ func TestCleanCoreMCPToolConcurrentSameKeyRunsSingleUpstream(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			args := cloneMap(confirmedRequest)
+			args := cloneMap(request)
 			if _, exists := args["intent"]; !exists {
 				args["intent"] = "test operation"
 			}
@@ -313,42 +292,5 @@ func TestCleanCoreMCPToolConcurrentSameKeyRunsSingleUpstream(t *testing.T) {
 	}
 	if after := fakeMCPStartCount(t, startLog); after != before+1 {
 		t.Fatalf("concurrent same-key calls must start upstream once: before=%d after=%d", before, after)
-	}
-}
-
-// TestCleanCoreExtensionFirstConfirmedCallStillRequiresGate ensures a first
-// call that carries user_confirmed=true cannot bypass the confirmation gate.
-// Only a prior unconfirmed call (which surfaced the gate) or a completed
-// replay may authorize execution; a just-claimed pending record must not.
-func TestCleanCoreExtensionFirstConfirmedCallStillRequiresGate(t *testing.T) {
-	rt := newWorkspaceRuntime(t, "demo")
-	rt.cfg.Discovery.MCP.Enabled = true
-	workspace, _ := rt.reg.Get("demo")
-	writeFakeMCPTestServer(t, workspace.Path)
-	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "workspace": "demo"})
-	remoteID := opened["remote_session_id"].(string)
-
-	described := callEnvelope(t, rt.toolMCPTool, context.Background(), map[string]any{
-		"action": "describe", "remote_session_id": remoteID, "server": "fake", "tool": "echo",
-	})
-	if !statusOK(described) {
-		t.Fatalf("mcp_tool describe=%+v", described)
-	}
-
-	request := map[string]any{
-		"action": "call", "remote_session_id": remoteID, "purpose": "call the fake MCP",
-		"server": "fake", "tool": "echo", "arguments": map[string]any{"value": "one"},
-		"idempotency_key": "mcp-echo-first-confirmed-1", "user_confirmed": true,
-	}
-	first := callEnvelope(t, rt.toolMCPTool, context.Background(), request)
-	if first["status"] != "waiting_confirmation" {
-		t.Fatalf("first user_confirmed=true call must still require confirmation=%+v", first)
-	}
-
-	// The retry after the surfaced confirmation is authorized by the pending
-	// approval and executes normally.
-	confirmed := callEnvelope(t, rt.toolMCPTool, context.Background(), request)
-	if !statusOK(confirmed) {
-		t.Fatalf("retry after confirmation must execute=%+v", confirmed)
 	}
 }

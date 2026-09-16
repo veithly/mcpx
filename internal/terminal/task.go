@@ -96,6 +96,7 @@ type Task struct {
 	done         chan struct{}
 	db           *sql.DB
 	cmd          *exec.Cmd
+	group        *processGroup
 	cancel       context.CancelFunc
 	outputSink   func(OutputChunk)
 }
@@ -389,7 +390,8 @@ func (m *TaskManager) startPrepared(requestID, callID, tool, remoteSessionID, wo
 	cmd.Stdout = &lockedWriter{t: t, stream: "stdout"}
 	cmd.Stderr = &lockedWriter{t: t, stream: "stderr"}
 
-	if err := cmd.Start(); err != nil {
+	group, err := startManagedProcess(cmd)
+	if err != nil {
 		t.closeFiles()
 		if stdin != nil {
 			_ = stdin.Close()
@@ -397,6 +399,7 @@ func (m *TaskManager) startPrepared(requestID, callID, tool, remoteSessionID, wo
 		cancel()
 		return nil, err
 	}
+	t.group = group
 	if cmd.Process != nil {
 		t.PID = cmd.Process.Pid
 	}
@@ -406,8 +409,9 @@ func (m *TaskManager) startPrepared(requestID, callID, tool, remoteSessionID, wo
             VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)`, t.ID, t.RemoteSessionID, t.WorkspaceName,
 			t.WorkDir, t.Command, t.PID, t.log.path, t.StartedAt.UnixMilli(), t.StartedAt.UnixMilli())
 		if err != nil {
-			killProcessTree(cmd)
-			_, _ = cmd.Process.Wait()
+			_ = group.kill()
+			_ = cmd.Wait()
+			_ = group.wait()
 			if t.stdin != nil {
 				_ = t.stdin.Close()
 			}
@@ -428,7 +432,16 @@ func (m *TaskManager) startPrepared(requestID, callID, tool, remoteSessionID, wo
 	}
 	go func() {
 		err := cmd.Wait()
+		groupErr := group.wait()
 		t.mu.Lock()
+		if groupErr != nil {
+			t.finishLocked(TaskFailed, -1)
+			t.mu.Unlock()
+			t.emitOutputFinal()
+			close(t.done)
+			cancel()
+			return
+		}
 		if t.Status == TaskKilled {
 			t.finishLocked(TaskKilled, -1)
 			t.mu.Unlock()
@@ -736,14 +749,19 @@ func (t *Task) Kill() error {
 	code := -1
 	t.ExitCode = &code
 	t.finishLocked(TaskKilled, code)
-	cmd, cancel := t.cmd, t.cancel
+	group, cmd, cancel := t.group, t.cmd, t.cancel
 	t.mu.Unlock()
-	killProcessTree(cmd)
+	var killErr error
+	if group != nil {
+		killErr = group.kill()
+	} else {
+		killProcessTree(cmd)
+	}
 	if cancel != nil {
 		cancel()
 	}
 	t.persistFinish()
-	return nil
+	return killErr
 }
 
 func (t *Task) enforceWallLimit(limit time.Duration) {
@@ -787,9 +805,11 @@ func (t *Task) terminateForLimit(reason string) {
 	}
 	t.Status = TaskKilled
 	t.LimitReason = reason
-	cmd, cancel := t.cmd, t.cancel
+	group, cancel := t.group, t.cancel
 	t.mu.Unlock()
-	killProcessTree(cmd)
+	if group != nil {
+		_ = group.kill()
+	}
 	if cancel != nil {
 		cancel()
 	}

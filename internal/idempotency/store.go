@@ -97,14 +97,15 @@ type flight struct {
 }
 
 type Store struct {
-	db      *sql.DB
-	now     func() time.Time
-	mu      sync.Mutex
-	flights map[string]*flight
+	db        *sql.DB
+	now       func() time.Time
+	mu        sync.Mutex
+	flights   map[string]*flight
+	uncertain map[string]string
 }
 
 func NewStore(db *sql.DB) *Store {
-	return &Store{db: db, now: time.Now, flights: make(map[string]*flight)}
+	return &Store{db: db, now: time.Now, flights: make(map[string]*flight), uncertain: make(map[string]string)}
 }
 
 // Lookup returns the durable record without claiming execution. It is used by
@@ -144,7 +145,26 @@ func (s *Store) Claim(ctx context.Context, key Key, fingerprint string, ttl time
 		s.mu.Unlock()
 		return Claim{Kind: ClaimWait, Done: done}, nil
 	}
+	uncertain := s.uncertain[identity]
 	s.mu.Unlock()
+	if uncertain != "" {
+		if uncertain != fingerprint {
+			return Claim{Kind: ClaimConflict}, nil
+		}
+		record, err := s.get(ctx, key)
+		if err != nil {
+			return Claim{}, err
+		}
+		if record.Fingerprint != fingerprint {
+			return Claim{Kind: ClaimConflict, Record: record}, nil
+		}
+		if record.State == StateSucceeded || record.State == StateFailed {
+			return Claim{Kind: ClaimReplay, Record: record}, nil
+		}
+		// 持久化失败后的本地墓碑只允许回读恢复，不重新取得执行权。
+		record.State = StateInDoubt
+		return Claim{Kind: ClaimInDoubt, Record: record}, nil
+	}
 
 	now := s.now().UTC()
 	record, err := s.get(ctx, key)
@@ -294,6 +314,17 @@ func (s *Store) Wait(ctx context.Context, claim Claim, key Key) (Record, error) 
 			// Abandon): nothing happened and the key is free again.
 			return Record{}, ErrAbandoned
 		}
+		if err == nil {
+			// A failed owner stop leaves an in-process tombstone so the same
+			// process never treats unknown effects as re-executable, while a
+			// mere failed Complete still exposes the durable record as-is.
+			s.mu.Lock()
+			tombstoned := s.uncertain[key.identity()] == record.Fingerprint
+			s.mu.Unlock()
+			if tombstoned {
+				return record, ErrInDoubt
+			}
+		}
 		return record, err
 	case <-ctx.Done():
 		return Record{}, ctx.Err()
@@ -398,13 +429,24 @@ func (s *Store) MarkInDoubt(ctx context.Context, key Key, fingerprint string, me
 	if !key.valid() || strings.TrimSpace(fingerprint) == "" {
 		return fmt.Errorf("idempotency key and fingerprint are required")
 	}
+	// 调用者已停止执行；即使数据库或请求 context 失效，也必须唤醒等待者，
+	// 同时禁止同一进程把未知效果当成新的可执行请求。
+	defer func() {
+		s.mu.Lock()
+		if active, ok := s.flights[key.identity()]; ok && active.fingerprint == fingerprint {
+			s.uncertain[key.identity()] = fingerprint
+			delete(s.flights, key.identity())
+			close(active.done)
+		}
+		s.mu.Unlock()
+	}()
 	var (
 		result sql.Result
 		err    error
 	)
-	// The flight is always released, even when the update fails: a waiter
-	// must never block forever on a dead owner.
-	defer s.finishFlight(key.identity())
+	// The tombstone defer above is the single flight release path: it always
+	// wakes waiters, and on the failure paths it records the in-process
+	// in-doubt marker before the record itself could be resolved.
 	if metadata == nil {
 		result, err = s.db.ExecContext(ctx, `UPDATE clean_idempotency_records SET state = ?, updated_at = ?
 			WHERE remote_session_id = ? AND principal_id = ? AND operation = ? AND idempotency_key = ? AND fingerprint = ? AND state IN (?, ?)`,

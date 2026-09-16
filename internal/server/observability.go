@@ -206,6 +206,9 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 		internalOperationStep := isOperationChild(callCtx)
 		var observationParseErr error
 		observationRequest, observationParseErr = r.parseEnv(callCtx, req)
+		if observationParseErr == nil {
+			r.touchRemoteSessionActivity(callCtx, observationRequest)
+		}
 		arguments := mcpresult.Arguments(req)
 		observedArguments = observationArguments(name, arguments)
 		var embeddedActivityErr error

@@ -42,6 +42,16 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	if commandProperties["remote_session_id"] == nil || commandProperties["purpose"] == nil || commandProperties["scope"] == nil || commandProperties["user_confirmed"] == nil {
 		t.Fatalf("execute schema must expose the clean-core semantic fields: %+v", commandProperties)
 	}
+	for _, name := range []string{"skill_tool", "mcp_tool"} {
+		var extensionSchema map[string]any
+		if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tools[name]), &extensionSchema); err != nil {
+			t.Fatal(err)
+		}
+		properties := extensionSchema["properties"].(map[string]any)
+		if properties["confirmation_key"] != nil || properties["user_confirmed"] != nil {
+			t.Fatalf("%s schema must leave confirmation decisions to the client: %+v", name, properties)
+		}
+	}
 	var sessionSchema map[string]any
 	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tools["session"]), &sessionSchema); err != nil {
 		t.Fatal(err)

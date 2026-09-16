@@ -7,17 +7,20 @@ import "mcpx/internal/approval"
 func pendingConfirmationItems(pending []approval.Pending) []map[string]any {
 	items := make([]map[string]any, 0, len(pending))
 	for _, pendingItem := range pending {
+		if pendingItem.Tool == "mcp_tool" || pendingItem.Tool == "skill_tool" {
+			continue
+		}
 		tool := pendingItem.Tool
 		if tool == "command_execute" {
 			tool = "execute"
 		}
 		item := map[string]any{
-			"tool":                    tool,
-			"summary":                 pendingItem.Summary,
-			"workspace":               pendingItem.Workspace,
-			"created_at":              pendingItem.CreatedAt,
-			"user_confirmed_required": true,
+			"tool":       tool,
+			"summary":    pendingItem.Summary,
+			"workspace":  pendingItem.Workspace,
+			"created_at": pendingItem.CreatedAt,
 		}
+		item["user_confirmed_required"] = true
 		if pendingItem.Command != "" {
 			item["command"] = pendingItem.Command
 			item["purpose"] = pendingItem.Purpose

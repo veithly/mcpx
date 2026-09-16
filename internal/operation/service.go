@@ -38,6 +38,10 @@ const DefaultStepTimeout = 30 * time.Minute
 // ErrStepTimeout marks a step that exceeded the execution wall deadline.
 var ErrStepTimeout = errors.New("RUNTIME_STEP_TIMEOUT")
 
+// ErrResultExpired reports a submission whose durable result no longer matches
+// the current run identity, so replaying it would attach a stale answer.
+var ErrResultExpired = errors.New("operation result expired; submission must not be replayed")
+
 var (
 	ErrNotFound         = errors.New("operation not found")
 	ErrInvalidSpec      = errors.New("invalid operation specification")

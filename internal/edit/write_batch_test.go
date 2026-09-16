@@ -9,9 +9,8 @@ import (
 
 // TestBatchWriteFailureCarriesBoundary drives a commit-phase failure through
 // the pre-write hook: after the first file is committed, the second file's
-// parent directory is replaced by a regular file so its write fails. The
-// returned error must preserve the failing entry and the exact
-// written/unwritten boundary.
+// parent directory is made read-only so its write fails. The returned error
+// must preserve the failing entry and the exact written/unwritten boundary.
 func TestBatchWriteFailureCarriesBoundary(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
@@ -24,12 +23,11 @@ func TestBatchWriteFailureCarriesBoundary(t *testing.T) {
 			{Path: "sub/b.txt", Operation: OpCreate, Content: "beta\n"},
 		},
 	}, func(BatchResult) error {
-		// Sabotage the second write between hook and commit.
-		if err := os.Remove(filepath.Join(dir, "sub")); err != nil {
-			t.Errorf("remove sub: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "sub"), []byte("not a dir"), 0o644); err != nil {
-			t.Errorf("write sub file: %v", err)
+		// Sabotage the second write between hook and commit. The parent stays
+		// resolvable (the post-hook re-verification still passes), but creating
+		// a file inside it now fails with a permission error.
+		if err := os.Chmod(filepath.Join(dir, "sub"), 0o500); err != nil {
+			t.Errorf("chmod sub: %v", err)
 		}
 		return nil
 	})

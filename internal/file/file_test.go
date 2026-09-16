@@ -19,7 +19,13 @@ func TestResolveEscape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(p, root) {
+	// Resolve returns the physical path, so compare against the physical root
+	// (macOS /var is a symlink to /private/var).
+	physical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(p, physical) {
 		t.Fatal(p)
 	}
 }
