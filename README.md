@@ -83,6 +83,8 @@ Runtime 边界内；所有有状态操作都绑定 `remote_session_id`，并通�
 `workspace` 和 `session` 负责发现 Workspace 与建立/恢复会话；进入 Workspace 后，源码变更、命令、
 Plan、Artifact 等有状态操作都以服务端返回的完整 `remote_session_id` 为关联主键。`runtime_read`、
 `environment_read` 等读取型支持工具在参数足够时也可独立读取运行时或环境事实。
+`runtime_read(view="project|instructions", workspace="项目名")` 不要求先创建 Session；
+若同时提供 `remote_session_id`，两者必须属于同一项目。未指定目标时不会自动选择项目。
 
 ## 设计边界
 
@@ -157,6 +159,11 @@ CI 会构建带 provenance 的二进制并通过 `mcpx -version` 校验 commit/d
 ```bash
 ./bin/mcpx workspace register /path/to/your/project
 ```
+
+服务启动时会校验每个已注册 Workspace 的根路径。若父目录尚不可用（例如外置
+磁盘还未挂载），启动会等待该路径出现；等待超时后仍会保留注册并记录 warning，
+不会把临时不可用当成已删除。父目录存在但目标目录已消失或不是目录的条目会被
+从 `config.yaml` 中移除，因此已删除的 disposable worktree 不需要手工清理。
 
 然后启动服务：
 
@@ -265,13 +272,15 @@ security:
 
 limits:
   max_result_bytes: 262144
+  max_mcp_result_bytes: 4194304
 ```
 
 首次生成配置的主要默认值包括：监听 `127.0.0.1:9090`；Streamable HTTP transport
 空闲 Session TTL 为 `24h`；窗口读取安全预算为 1 MiB，显式 `full` 源文件硬上限为 4 MiB；
 文件策略默认 `max_patch_files=20`、`max_patch_lines=2000`，而公开 `edit` 工具还有独立的
-1000 changed-lines 硬上限；工具结果预算为 256 KiB；Terminal、File Watch、Skill 和上游 MCP
-发现默认启用。状态保留任务默认每天运行一次，过程事件与终端 Task 默认保留 30 天，模型记忆事件
+1000 changed-lines 硬上限；普通文本结果预算为 256 KiB，上游 MCP 完整响应（含 base64 图片）
+使用独立的 4 MiB 预算 `limits.max_mcp_result_bytes`，可在全局或项目配置中调整；Terminal、File Watch、Skill 和上游 MCP
+发现默认启用。状态保留任务默认每小时运行一次，过程事件与终端 Task 默认保留 30 天，模型记忆事件
 保留 180 天，环境快照保留 90 天。单个执行 Task 的观测输出最多持久化 32 MiB，超出后观测事件
 会标记为截断；完整输出仍通过 Task 日志 Resource URI 读取。
 
@@ -667,6 +676,12 @@ MCP：不知道 Server 时 `list`；知道 Server 但不知道 Tools 时 `list(s
 `skill_tool` 与 `mcp_tool` 的顶层 MCP annotation 按最坏情况声明为可破坏、开放世界调用；Runtime 再根据本次选中的对象做实际决策。文档型 Skill，以及上游明确标注为只读且 closed-world 的 Tool 可直接调用；可执行 Skill、缺少风险 annotation 的上游 Tool，以及任何可写、可破坏或开放世界调用都会先返回 `waiting_confirmation`。用户确认后，使用相同业务参数并设置 `user_confirmed=true` 重试；服务端只接受与当前目标、revision、参数摘要和用途匹配的 pending confirmation。恢复动作不会回显 extension arguments，避免把可能的 Secret 写入错误响应或日志。
 
 MCP 的 `call` 在同一个已初始化的上游实例内完成 `tools/list`、schema 校验和 `tools/call`，不会先检查实例 A、再执行实例 B。Session inventory 与 `mcp_tool(action=list)` 只返回 Server 名称、description 和状态，用于第一轮 relevance routing；完整 Tool schema 仍需按需 `describe`。
+
+上游调用发生传输或协议错误后，不会自动重发 `tools/call`：未收到结果不代表操作没有执行。
+需要重取结果时复用同一 `idempotency_key`；不要为了重新获取截图而重复点击、按键等副作用。
+超过 MCP 响应预算仍返回 `MCP_RESULT_TOO_LARGE`，并明确操作已返回、不可盲目重做。
+macOS 常驻进程直接执行程序时优先使用现有 PATH；仅在找不到裸程序名时，检查
+`/opt/homebrew/bin` 和 `/usr/local/bin`，无需加载交互式 shell 配置或修改系统 PATH。
 
 ### 6. 批量和异步操作
 

@@ -122,6 +122,14 @@ type BuildInfo struct {
 	Date    string
 }
 
+// Workspace roots can be temporarily unavailable at boot when they live on an
+// external volume that has not mounted yet. Wait before deciding, so a slow
+// mount is not mistaken for a deleted workspace.
+var (
+	workspaceRootWait         = 30 * time.Second
+	workspaceRootPollInterval = 500 * time.Millisecond
+)
+
 // New constructs a Runtime from the registered global configuration.
 func New(opts Options) (*Runtime, error) {
 	// First boot: create ~/.mcpx/config.yaml, empty .mcp.json, logs/, skills/
@@ -153,6 +161,33 @@ func New(opts Options) (*Runtime, error) {
 	cfg, err := config.LoadGlobal(globalPath)
 	if err != nil {
 		return nil, err
+	}
+	waitDeadline := time.Now().Add(workspaceRootWait)
+	for {
+		var removedWorkspaces []string
+		var pendingWorkspaces []string
+		cfg, removedWorkspaces, pendingWorkspaces, err = config.PruneMissingWorkspaces(globalPath, cfg)
+		if err != nil {
+			return nil, err
+		}
+		for _, removed := range removedWorkspaces {
+			logging.With("component", "workspace").Warn("removed missing workspace", "workspace", removed)
+		}
+		if len(pendingWorkspaces) == 0 {
+			break
+		}
+		if time.Now().After(waitDeadline) {
+			logging.With("component", "workspace").Warn(
+				"workspace root still unavailable; keeping registration",
+				"workspaces", strings.Join(pendingWorkspaces, ","),
+			)
+			break
+		}
+		logging.With("component", "workspace").Warn(
+			"waiting for workspace root",
+			"workspaces", strings.Join(pendingWorkspaces, ","),
+		)
+		time.Sleep(workspaceRootPollInterval)
 	}
 	reg, err := workspace.NewRegistry(cfg.Workspaces)
 	if err != nil {

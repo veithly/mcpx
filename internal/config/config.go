@@ -55,7 +55,8 @@ type TransportConfig struct {
 }
 
 type LimitsConfig struct {
-	MaxResultBytes int `yaml:"max_result_bytes"`
+	MaxResultBytes    int `yaml:"max_result_bytes"`
+	MaxMCPResultBytes int `yaml:"max_mcp_result_bytes"`
 }
 
 // StateConfig controls durable state retention. It is process-wide and is
@@ -186,7 +187,7 @@ func DefaultConfig() Config {
 			OAuth: OAuthConfig{TokenTTL: 604800},
 		},
 		Transport: TransportConfig{SessionIdleTTL: "24h"},
-		Limits:    LimitsConfig{MaxResultBytes: 256 << 10},
+		Limits:    LimitsConfig{MaxResultBytes: 256 << 10, MaxMCPResultBytes: 4 << 20},
 		State: StateConfig{Retention: RetentionConfig{
 			Enabled: true,
 			// Hourly cadence keeps bounded batch deletes ahead of the write rate

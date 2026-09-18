@@ -89,14 +89,14 @@ func TestWorkspaceInfoDoesNotAutoSelectSingleWorkspace(t *testing.T) {
 	}
 	env := decodeToolResult(t, out)
 	errObj, _ := env["error"].(map[string]any)
-	if env["status"] != "failed" || errObj["code"] != "REMOTE_SESSION_REQUIRED" {
+	if env["status"] != "failed" || errObj["code"] != "WORKSPACE_REQUIRED" {
 		// code may live on wire error or nested data depending on wrap path
 		if data, _ := env["data"].(map[string]any); data != nil {
 			if nested, _ := data["error"].(map[string]any); nested != nil {
 				errObj = nested
 			}
 		}
-		if env["status"] != "failed" || errObj["code"] != "REMOTE_SESSION_REQUIRED" {
+		if env["status"] != "failed" || errObj["code"] != "WORKSPACE_REQUIRED" {
 			t.Fatalf("expected explicit workspace error, got %+v", env)
 		}
 	}

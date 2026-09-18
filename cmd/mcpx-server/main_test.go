@@ -94,12 +94,6 @@ func TestStopPreviousBackgroundCorruptStateReturnsError(t *testing.T) {
 	}
 }
 
-func TestBackgroundChildSubcommandIsInternal(t *testing.T) {
-	if backgroundChildSubcommand != "__background-child" {
-		t.Fatalf("unexpected internal background child subcommand %q", backgroundChildSubcommand)
-	}
-}
-
 func TestBackgroundChildArgsRemovesDaemonFlag(t *testing.T) {
 	got := backgroundChildArgs([]string{"-addr", "127.0.0.1:9999", "-d", "-log-level", "debug"})
 	want := []string{"-addr", "127.0.0.1:9999", "-log-level", "debug"}

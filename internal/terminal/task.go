@@ -327,7 +327,7 @@ func (m *TaskManager) StartRemoteProcessWithObservationContext(requestID, callID
 		return nil, fmt.Errorf("process executable is required")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, spec.Executable, spec.Args...)
+	cmd := commandProcess(ctx, spec.Executable, spec.Args...)
 	cmd.Dir = workDir
 	configureProcess(cmd)
 	return m.startPrepared(requestID, callID, tool, remoteSessionID, workspaceName, workDir, displayCommand, cmd, cancel, false, spec.Stdin, spec.WallLimit, spec.CPUTimeLimit)

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"mcpx/internal/auth"
 	"mcpx/internal/config"
@@ -16,22 +17,90 @@ import (
 	"mcpx/internal/terminal"
 )
 
-func TestConfigRoundTripInNew(t *testing.T) {
+func TestStartupPrunesMissingWorkspaces(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("MCPX_HOME", home)
-	ws := filepath.Join(home, "p")
-	_ = os.MkdirAll(ws, 0o755)
+	valid := filepath.Join(home, "valid")
+	if err := os.MkdirAll(valid, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(home, "gone")
 	cfg := config.DefaultConfig()
-	cfg.Workspaces = []config.WorkspaceEntry{{Name: "p", Path: ws}}
+	cfg.Auth.Mode = "open"
+	cfg.Logging.Enabled = false
+	cfg.Logging.Dir = filepath.Join(home, "logs")
+	cfg.Workspaces = []config.WorkspaceEntry{
+		{Name: "valid", Path: valid},
+		{Name: "gone", Path: missing},
+	}
 	if err := config.WriteGlobal(filepath.Join(home, "config.yaml"), cfg); err != nil {
 		t.Fatal(err)
 	}
+
 	rt, err := New(Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rt.reg.List()) != 1 {
-		t.Fatalf("expected 1 workspace, got %d", len(rt.reg.List()))
+	t.Cleanup(func() { _ = rt.Close() })
+	if got := rt.reg.List(); len(got) != 1 || got[0].Name != "valid" {
+		t.Fatalf("registry after startup=%+v", got)
+	}
+	persisted, err := config.LoadGlobal(filepath.Join(home, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted.Workspaces) != 1 || persisted.Workspaces[0].Name != "valid" {
+		t.Fatalf("persisted after startup=%+v", persisted.Workspaces)
+	}
+}
+
+func TestStartupWaitsForUnavailableWorkspaceParent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("MCPX_HOME", home)
+	mountRoot := filepath.Join(home, "volume")
+	workspacePath := filepath.Join(mountRoot, "code", "project")
+	cfg := config.DefaultConfig()
+	cfg.Auth.Mode = "open"
+	cfg.Logging.Enabled = false
+	cfg.Logging.Dir = filepath.Join(home, "logs")
+	cfg.Workspaces = []config.WorkspaceEntry{{Name: "project", Path: workspacePath}}
+	if err := config.WriteGlobal(filepath.Join(home, "config.yaml"), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		runtime *Runtime
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		rt, err := New(Options{})
+		done <- result{runtime: rt, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		if got.runtime != nil {
+			_ = got.runtime.Close()
+		}
+		t.Fatalf("startup did not wait for unavailable workspace parent: %v", got.err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	if err := os.MkdirAll(workspacePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		t.Cleanup(func() { _ = got.runtime.Close() })
+		if names := got.runtime.reg.List(); len(names) != 1 || names[0].Name != "project" {
+			t.Fatalf("registry after mount=%+v", names)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup did not resume after workspace parent appeared")
 	}
 }
 

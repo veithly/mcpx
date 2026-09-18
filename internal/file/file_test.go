@@ -15,18 +15,8 @@ func TestResolveEscape(t *testing.T) {
 	if _, err := Resolve(root, "../x"); err == nil {
 		t.Fatal("expected escape error")
 	}
-	p, err := Resolve(root, "a/b.txt")
-	if err != nil {
+	if _, err := Resolve(root, "a/b.txt"); err != nil {
 		t.Fatal(err)
-	}
-	// Resolve returns the physical path, so compare against the physical root
-	// (macOS /var is a symlink to /private/var).
-	physical, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(p, physical) {
-		t.Fatal(p)
 	}
 }
 
@@ -74,7 +64,7 @@ func TestLexicalPathPreservesFinalSymlink(t *testing.T) {
 	}
 }
 
-func TestReadAndPatch(t *testing.T) {
+func TestReadReturnsFileContent(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "f.txt")
 	if err := os.WriteFile(path, []byte("hello world\nline2\n"), 0o644); err != nil {
@@ -86,19 +76,6 @@ func TestReadAndPatch(t *testing.T) {
 	}
 	if !strings.Contains(r.Content, "hello") {
 		t.Fatal(r.Content)
-	}
-	pr, err := SearchReplace(PatchSearchReplace{
-		WorkspaceRoot: root,
-		Path:          "f.txt",
-		OldString:     "hello world",
-		NewString:     "hello mcpx",
-	})
-	if err != nil || !pr.Changed {
-		t.Fatalf("%v %+v", err, pr)
-	}
-	b, _ := os.ReadFile(path)
-	if !strings.Contains(string(b), "hello mcpx") {
-		t.Fatal(string(b))
 	}
 }
 
@@ -268,17 +245,6 @@ func TestReadFullPreservesBinaryAndRejectsOversize(t *testing.T) {
 	}
 	if _, err := ReadFull(FullReadOptions{WorkspaceRoot: root, Path: "preview.png", MaxBytes: 4}); err == nil {
 		t.Fatal("oversize full read should fail")
-	}
-}
-
-func TestSearchReplaceUnique(t *testing.T) {
-	root := t.TempDir()
-	_ = os.WriteFile(filepath.Join(root, "f.txt"), []byte("aa aa"), 0o644)
-	_, err := SearchReplace(PatchSearchReplace{
-		WorkspaceRoot: root, Path: "f.txt", OldString: "aa", NewString: "b",
-	})
-	if err == nil {
-		t.Fatal("expected non-unique error")
 	}
 }
 

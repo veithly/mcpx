@@ -374,6 +374,8 @@ func (r *Runtime) toolMCPCallOnSession(ctx context.Context, req *mcp.CallToolReq
 	serverName := strings.TrimSpace(stringPayload(envReq.Payload, "server"))
 	toolName := strings.TrimSpace(stringPayload(envReq.Payload, "tool"))
 	args, _ := envReq.Payload["arguments"].(map[string]any)
+	// A transport/protocol error does not prove the upstream had no effects.
+	// Never dispatch again here; explicit same-key retries use durable replay.
 	res, err := client.CallTool(ctx, toolName, args, mcpCallRequestMeta(envReq, remote.ID, remote.WorkspaceName))
 	if err != nil {
 		code := "MCP_CALL_FAILED"
@@ -394,7 +396,7 @@ func (r *Runtime) toolMCPCallOnSession(ctx context.Context, req *mcp.CallToolReq
 	if encodeErr != nil {
 		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "RESULT_ENCODING_FAILED", "upstream result could not be serialized; inspect its effects before retrying")
 	}
-	maxResultBytes := config.MaxResultBytes(eff.Limits)
+	maxResultBytes := config.MaxMCPResultBytes(eff.Limits)
 	if maxResultBytes > 0 && len(b) > maxResultBytes {
 		response := envelope.Fail(envelope.StatusError, envReq.RequestID, remote.WorkspaceName, nil, "MCP_RESULT_TOO_LARGE", "upstream MCP result exceeds the configured response budget")
 		response.RemoteSessionID = remote.ID

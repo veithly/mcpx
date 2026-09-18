@@ -184,6 +184,9 @@ func merge(global, project Config, mergeAuth bool) Config {
 	if project.Limits.MaxResultBytes != 0 {
 		out.Limits.MaxResultBytes = project.Limits.MaxResultBytes
 	}
+	if project.Limits.MaxMCPResultBytes != 0 {
+		out.Limits.MaxMCPResultBytes = project.Limits.MaxMCPResultBytes
+	}
 	if project.Description != "" {
 		out.Description = project.Description
 	}
@@ -318,8 +321,68 @@ func RegisterWorkspace(globalPath, absPath string) error {
 	return WriteGlobal(globalPath, cfg)
 }
 
-// WriteGlobal writes config YAML, creating parent dirs. It replaces the file
-// atomically so a crash or interrupted write cannot leave a truncated config.
+// PruneMissingWorkspaces removes registered workspaces whose parent directory
+// exists but whose root path is missing or is not a directory. Entries whose
+// parent directory is unavailable are returned as pending so the caller can
+// wait for a removable volume or mount to become ready before deciding.
+func PruneMissingWorkspaces(globalPath string, cfg Config) (Config, []string, []string, error) {
+	if globalPath == "" {
+		var err error
+		globalPath, err = GlobalConfigPath()
+		if err != nil {
+			return cfg, nil, nil, err
+		}
+	}
+	var kept []WorkspaceEntry
+	var removed []string
+	var pending []string
+	for _, entry := range cfg.Workspaces {
+		if strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Path) == "" {
+			removed = append(removed, fmt.Sprintf("%s@%s", entry.Name, entry.Path))
+			continue
+		}
+		abs, err := filepath.Abs(ExpandHome(entry.Path))
+		if err != nil {
+			removed = append(removed, fmt.Sprintf("%s@%s", entry.Name, entry.Path))
+			continue
+		}
+		st, statErr := os.Stat(abs)
+		if statErr == nil {
+			if st.IsDir() {
+				kept = append(kept, entry)
+			} else {
+				removed = append(removed, fmt.Sprintf("%s@%s", entry.Name, entry.Path))
+			}
+			continue
+		}
+		if !errors.Is(statErr, os.ErrNotExist) {
+			// The path may exist but be temporarily unreadable. Do not treat an
+			// indeterminate stat failure as deletion.
+			pending = append(pending, entry.Name)
+			kept = append(kept, entry)
+			continue
+		}
+		if _, parentErr := os.Stat(filepath.Dir(abs)); parentErr != nil {
+			// The parent (for example an external volume) is not available yet.
+			// Keep the registration and let the caller wait before deciding.
+			pending = append(pending, entry.Name)
+			kept = append(kept, entry)
+			continue
+		}
+		removed = append(removed, fmt.Sprintf("%s@%s", entry.Name, entry.Path))
+	}
+	if len(removed) == 0 {
+		return cfg, nil, pending, nil
+	}
+	cfg.Workspaces = kept
+	if err := WriteGlobal(globalPath, cfg); err != nil {
+		return cfg, removed, pending, err
+	}
+	return cfg, removed, pending, nil
+}
+
+// WriteGlobal writes config YAML, creating parent dirs. Replace atomically so
+// interruption cannot truncate the active configuration.
 func WriteGlobal(path string, cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err

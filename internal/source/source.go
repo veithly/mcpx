@@ -308,10 +308,7 @@ func SearchWith(root string, opts SearchOptions, allowed func(string) bool) (Sea
 			return SearchResult{}, fmt.Errorf("invalid regular expression: %w", err)
 		}
 	}
-	if len(opts.ScopePaths) > 0 {
-		allowed = ScopePathFilter(root, opts.ScopePaths, allowed)
-	}
-	filePaths, err := paths(root, opts.Pattern, opts.ExcludePattern, allowed)
+	filePaths, err := paths(root, opts.Pattern, opts.ExcludePattern, allowed, opts.ScopePaths...)
 	if err != nil {
 		return SearchResult{}, err
 	}
@@ -801,10 +798,15 @@ func MatchGlob(pattern, value string) (bool, error) {
 	return compiled.MatchString(value), nil
 }
 
-func paths(root, pattern, excludePattern string, allowed func(string) bool) ([]string, error) {
+func paths(root, pattern, excludePattern string, allowed func(string) bool, seeds ...string) ([]string, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
+	}
+	scoped := len(seeds) > 0
+	scopes := normalizedScopePaths(root, seeds)
+	if scoped && len(scopes) == 0 {
+		return nil, nil // Invalid/missing seeds never widen a query to the root.
 	}
 	var result []string
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -814,8 +816,16 @@ func paths(root, pattern, excludePattern string, allowed func(string) bool) ([]s
 		if path == root {
 			return nil
 		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil
+		}
+		relative = filepath.ToSlash(relative)
 		if entry.IsDir() {
 			if ignoredDirectories[entry.Name()] {
+				return fs.SkipDir
+			}
+			if scoped && !pathIntersectsScopes(relative, scopes, true) {
 				return fs.SkipDir
 			}
 			return nil
@@ -823,11 +833,9 @@ func paths(root, pattern, excludePattern string, allowed func(string) bool) ([]s
 		if !entry.Type().IsRegular() {
 			return nil
 		}
-		relative, err := filepath.Rel(root, path)
-		if err != nil {
+		if scoped && !pathIntersectsScopes(relative, scopes, false) {
 			return nil
 		}
-		relative = filepath.ToSlash(relative)
 		if allowed != nil && !allowed(relative) {
 			return nil
 		}

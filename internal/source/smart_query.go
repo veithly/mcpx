@@ -68,11 +68,7 @@ func SmartQueryPage(root string, opts SmartQueryOptions) (map[string]any, error)
 		opts.MaxBytesPerFile = 64 << 10
 	}
 	analysis := AnalyzeQuery(opts.Query)
-	allowed := opts.Allowed
-	if len(opts.ScopePaths) > 0 {
-		allowed = ScopePathFilter(root, opts.ScopePaths, allowed)
-	}
-	paths, err := paths(root, opts.Pattern, opts.ExcludePattern, allowed)
+	paths, err := paths(root, opts.Pattern, opts.ExcludePattern, opts.Allowed, opts.ScopePaths...)
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +168,18 @@ func SmartQueryPage(root string, opts SmartQueryOptions) (map[string]any, error)
 // includes only that file. Invalid or missing seeds match nothing instead of
 // silently widening the query back to the workspace root.
 func ScopePathFilter(root string, seeds []string, allowed func(string) bool) func(string) bool {
+	scopes := normalizedScopePaths(root, seeds)
+	return func(path string) bool {
+		if allowed != nil && !allowed(path) {
+			return false
+		}
+		return pathIntersectsScopes(filepath.ToSlash(filepath.Clean(path)), scopes, false)
+	}
+}
+
+// Share scope normalization between file filtering and directory pruning so
+// missing, unsafe and symlink-escaped seeds retain the same closed behavior.
+func normalizedScopePaths(root string, seeds []string) []string {
 	scopes := make([]string, 0, len(seeds))
 	for _, seed := range seeds {
 		seed = strings.TrimSpace(seed)
@@ -197,18 +205,20 @@ func ScopePathFilter(root string, seeds []string, allowed func(string) bool) fun
 		}
 		scopes = append(scopes, normalized)
 	}
-	return func(path string) bool {
-		if allowed != nil && !allowed(path) {
-			return false
+	return scopes
+}
+
+func pathIntersectsScopes(path string, scopes []string, directory bool) bool {
+	for _, scope := range scopes {
+		if scope == "" || path == scope || strings.HasPrefix(path, scope+"/") {
+			return true
 		}
-		path = filepath.ToSlash(filepath.Clean(path))
-		for _, scope := range scopes {
-			if scope == "" || path == scope || strings.HasPrefix(path, scope+"/") {
-				return true
-			}
+		// Ancestors must stay traversable to reach nested directories/files.
+		if directory && strings.HasPrefix(scope, path+"/") {
+			return true
 		}
-		return false
 	}
+	return false
 }
 
 func loadSmartDocuments(root string, filePaths []string) []smartDocument {

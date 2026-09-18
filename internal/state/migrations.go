@@ -62,20 +62,6 @@ var migrations = []string{
         UNIQUE (remote_session_id, principal_id, client_name, client_version),
         FOREIGN KEY (remote_session_id) REFERENCES remote_sessions(id) ON DELETE CASCADE
     );
-    CREATE TABLE IF NOT EXISTS remote_session_handoffs (
-        id TEXT PRIMARY KEY,
-        remote_session_id TEXT NOT NULL,
-        token_hash TEXT NOT NULL UNIQUE,
-        role TEXT NOT NULL CHECK (role IN ('viewer','editor','approver')),
-        created_by TEXT NOT NULL,
-        note TEXT NOT NULL DEFAULT '',
-        created_at INTEGER NOT NULL,
-        expires_at INTEGER NOT NULL,
-        consumed_at INTEGER,
-        consumed_by TEXT,
-        revoked_at INTEGER,
-        FOREIGN KEY (remote_session_id) REFERENCES remote_sessions(id) ON DELETE CASCADE
-    );
     CREATE TABLE IF NOT EXISTS remote_session_events (
         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
         remote_session_id TEXT NOT NULL,
@@ -113,10 +99,7 @@ var migrations = []string{
     CREATE INDEX IF NOT EXISTS idx_remote_members_principal
         ON remote_session_members(principal_id, last_active_at DESC);
     CREATE INDEX IF NOT EXISTS idx_remote_events_session_sequence
-        ON remote_session_events(remote_session_id, sequence DESC);
-    CREATE INDEX IF NOT EXISTS idx_remote_handoffs_expiry
-        ON remote_session_handoffs(expires_at)
-        WHERE consumed_at IS NULL AND revoked_at IS NULL;`,
+        ON remote_session_events(remote_session_id, sequence DESC);`,
 	`SELECT 1;`,
 	`SELECT 1;`,
 	`CREATE TABLE IF NOT EXISTS workspace_baselines (

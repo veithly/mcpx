@@ -22,13 +22,20 @@ import (
 )
 
 func (r *Runtime) toolProjectInspect(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	envReq, _, session, fail := r.changeRequest(ctx, req, false)
+	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil
 	}
-	data := inspectProject(ctx, session.WorkspacePath)
-	data["agent_instructions"] = r.agentInstructions(session.WorkspacePath)
-	return r.remoteResult(envReq, session.ID, session.WorkspaceName, data)
+	ws, remoteID, err := r.resolveExplicitWorkspace(ctx, principal, envReq)
+	if err != nil {
+		return r.remoteError(envReq, remoteID, ws.Name, err)
+	}
+	if ws.Path == "" {
+		return r.terminalError(envReq, remoteID, ws.Name, "WORKSPACE_REQUIRED", "Specify workspace or remote_session_id to read project information; use workspace to list registered projects.")
+	}
+	data := inspectProject(ctx, ws.Path)
+	data["agent_instructions"] = r.agentInstructions(ws.Path)
+	return r.remoteResult(envReq, remoteID, ws.Name, data)
 }
 
 func (r *Runtime) sourcePathAllowed(workspacePath string) func(string) bool {

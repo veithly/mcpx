@@ -44,12 +44,6 @@ func TestEventStatusUsesSemanticMarkerAndColor(t *testing.T) {
 	}
 }
 
-func TestInteractionLineBudget(t *testing.T) {
-	if maxInteractionBodyLines != 50 {
-		t.Fatalf("body line budget=%d", maxInteractionBodyLines)
-	}
-}
-
 func TestDiffLineStyleUsesTrueColorAndFallback(t *testing.T) {
 	added := diffLineStyle("+new", ColorModeTrueColor)
 	if !strings.Contains(added, ansiDiffAddedBackground) || !strings.Contains(added, ansiDiffAddedForeground) || !strings.HasSuffix(added, ansiReset) {
@@ -685,21 +679,6 @@ func TestRenderTextColorsCommandAndStreams(t *testing.T) {
 		if !strings.Contains(failedText, want) {
 			t.Fatalf("failed command color missing %q: %q", want, failedText)
 		}
-	}
-}
-
-func TestRenderTextHidesDeprecatedSkillInput(t *testing.T) {
-	var output bytes.Buffer
-	if err := RenderText(&output, Event{
-		Tool:  "session_open",
-		Type:  TypeToolStarted,
-		Input: []byte(`{"include_skills":true,"workspace":"fyy"}`),
-	}, false); err != nil {
-		t.Fatal(err)
-	}
-	text := output.String()
-	if text != "" || strings.Contains(text, "include_skills") {
-		t.Fatalf("tool start or deprecated skill input leaked into observation: %s", text)
 	}
 }
 

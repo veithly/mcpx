@@ -11,9 +11,16 @@ import (
 )
 
 func (r *Runtime) toolAgentInstructionList(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	envReq, _, remote, fail := r.changeRequest(ctx, req, false)
+	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil
+	}
+	ws, remoteID, err := r.resolveExplicitWorkspace(ctx, principal, envReq)
+	if err != nil {
+		return r.remoteError(envReq, remoteID, ws.Name, err)
+	}
+	if ws.Path == "" {
+		return r.terminalError(envReq, remoteID, ws.Name, "WORKSPACE_REQUIRED", "Specify workspace or remote_session_id to read project instructions; use workspace to list registered projects.")
 	}
 	anchor, _ := envReq.Payload["anchor_path"].(string)
 	var paths []string
@@ -24,9 +31,9 @@ func (r *Runtime) toolAgentInstructionList(ctx context.Context, req *mcp.CallToo
 			}
 		}
 	}
-	maxBytes := r.effectiveConfig(remote.WorkspacePath).Security.Files.MaxReadBytes
+	maxBytes := r.effectiveConfig(ws.Path).Security.Files.MaxReadBytes
 	docs := instruction.DiscoverAt(
-		r.cfg.Discovery.Instructions.GlobalAgentsPath, remote.WorkspacePath, anchor, maxBytes,
+		r.cfg.Discovery.Instructions.GlobalAgentsPath, ws.Path, anchor, maxBytes,
 	)
 	data := map[string]any{
 		"instructions":         docs,
@@ -35,10 +42,10 @@ func (r *Runtime) toolAgentInstructionList(ctx context.Context, req *mcp.CallToo
 	}
 	if len(paths) > 0 {
 		data["resolution"] = instruction.ResolveForPaths(
-			r.cfg.Discovery.Instructions.GlobalAgentsPath, remote.WorkspacePath, paths, maxBytes,
+			r.cfg.Discovery.Instructions.GlobalAgentsPath, ws.Path, paths, maxBytes,
 		)
 	}
-	return r.remoteResult(envReq, remote.ID, remote.WorkspaceName, data)
+	return r.remoteResult(envReq, remoteID, ws.Name, data)
 }
 
 func (r *Runtime) toolAgentInstructionRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

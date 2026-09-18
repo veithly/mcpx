@@ -85,6 +85,16 @@ func MaxResultBytes(l LimitsConfig) int {
 	return l.MaxResultBytes
 }
 
+// MaxMCPResultBytes bounds the complete upstream wire result, including base64
+// media. It is separate from the text-output budget: successful desktop actions
+// commonly return screenshots larger than a command's output allowance.
+func MaxMCPResultBytes(l LimitsConfig) int {
+	if l.MaxMCPResultBytes <= 0 {
+		return 4 << 20
+	}
+	return l.MaxMCPResultBytes
+}
+
 // OAuthTokenTTL seconds; default 604800 (7 days); clamped 60..604800.
 func OAuthTokenTTL(o OAuthConfig) int {
 	ttl := o.TokenTTL

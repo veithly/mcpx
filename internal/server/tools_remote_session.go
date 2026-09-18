@@ -238,7 +238,7 @@ func (r *Runtime) createRemoteSession(ctx context.Context, principal auth.Princi
 	}
 	r.consoleMu.Unlock()
 	locked = false
-	if result.ResumeTokenAlreadyIssued {
+	if result.Replayed {
 		// Cached bootstrap JSON omits WorkspacePath. Reload the authoritative binding.
 		stored, err := r.remote.Get(ctx, principal, result.Session.ID)
 		if err != nil {
@@ -252,7 +252,7 @@ func (r *Runtime) createRemoteSession(ctx context.Context, principal auth.Princi
 	if err := r.ensureSessionEnvironment(ctx, principal, &result); err != nil {
 		r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: result.Session.ID, Workspace: workspaceName, Tool: "environment_snapshot", Status: "error", Detail: map[string]any{"error": err.Error()}})
 	}
-	if result.ResumeTokenAlreadyIssued {
+	if result.Replayed {
 		return result, nil
 	}
 	if err := r.workspaceDiff.CaptureBaseline(ctx, result.Session.ID, result.Session.WorkspacePath); err != nil {
