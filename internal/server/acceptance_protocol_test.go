@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -114,6 +115,9 @@ func acceptanceNormalized(result map[string]any, arcEnvelope map[string]any, res
 	if arcEnvelope != nil {
 		normalized["_arc"] = arcEnvelope
 	}
+	if actions, ok := result["actions"]; ok && actions != nil {
+		normalized["actions"] = actions
+	}
 	if errBody, ok := result["error"]; ok && errBody != nil {
 		normalized["error"] = errBody
 	} else if resultData, ok := data.(map[string]any); ok {
@@ -216,7 +220,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	expectedTools := []string{
 		"workspace", "session", "read", "edit", "move_out", "observe", "progress",
 		"operation_batch", "operation_manage",
-		"execute", "plan", "artifact", "skill_tool", "mcp_tool",
+		"execute", "plan", "artifact", "skill_tool", "mcp_tool", "browser",
 		"runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide",
 	}
 	if len(byName) != len(expectedTools) {
@@ -236,16 +240,20 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		if err := json.Unmarshal(encoded, &listedTool); err != nil {
 			t.Fatalf("decode %s: %v", name, err)
 		}
-		outputSchema, ok := listedTool["outputSchema"].(map[string]any)
-		if !ok {
-			t.Fatalf("%s must expose an OutputSchema: %+v", name, listedTool["outputSchema"])
-		}
+		rawOutputSchema, hasOutputSchema := listedTool["outputSchema"]
 		if name == "mcp_tool" {
-			if outputSchema["$id"] != "urn:mcpx:mcp-tool-result:v1" || outputSchema["type"] != nil {
-				t.Fatalf("mcp_tool must allow transparent upstream structuredContent of any JSON shape: %+v", outputSchema)
+			if hasOutputSchema && rawOutputSchema != nil {
+				t.Fatalf("mcp_tool must omit outputSchema: %+v", rawOutputSchema)
 			}
-		} else if outputSchema["$id"] != "urn:mcpx:structured-content:v2.0" {
-			t.Fatalf("%s must expose the ARC structuredContent OutputSchema: %+v", name, listedTool["outputSchema"])
+		} else {
+			outputSchema, ok := rawOutputSchema.(map[string]any)
+			if !ok {
+				t.Fatalf("%s must expose an OutputSchema: %+v", name, rawOutputSchema)
+			}
+			if outputSchema["$id"] != "urn:mcpx:structured-content:v2.0" {
+				t.Fatalf("%s must expose the ARC structuredContent OutputSchema: %+v", name, rawOutputSchema)
+			}
+
 		}
 		inputSchema, err := json.Marshal(tool.InputSchema)
 		if err != nil {
@@ -269,10 +277,13 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		t.Fatal(err)
 	}
 	schemaText := string(schemaJSON)
-	for _, needle := range []string{"remote_session_id", "base_sha256", "content", "replacements", "edits"} {
+	for _, needle := range []string{"remote_session_id", "rev", "content", "replacements", "edits"} {
 		if !strings.Contains(schemaText, needle) {
 			t.Fatalf("edit schema missing %q: %s", needle, schemaText)
 		}
+	}
+	if strings.Contains(schemaText, "base_sha256") {
+		t.Fatalf("edit schema must not expose legacy base_sha256: %s", schemaText)
 	}
 	if !strings.Contains(schemaText, "update") || !strings.Contains(schemaText, "create") || !strings.Contains(schemaText, "rename") || strings.Contains(schemaText, "user_confirmed") || strings.Contains(schemaText, "\"delete\"") {
 		t.Fatalf("edit operation enum incomplete: %s", schemaText)
@@ -282,60 +293,54 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	if err := json.Unmarshal(moveSchema, &moveSchemaMap); err != nil {
 		t.Fatal(err)
 	}
-	for _, needle := range []string{"prepare", "submit", "targets", "expected_sha256", "symlink", "confirmation_uuid"} {
+	for _, needle := range []string{"prepare", "submit", "targets", "rev", "expected_sha256", "symlink", "confirmation_uuid"} {
 		if !strings.Contains(string(moveSchema), needle) {
 			t.Fatalf("move_out schema missing %q: %s", needle, moveSchema)
 		}
 	}
-	branches, _ := moveSchemaMap["oneOf"].([]any)
-	if len(branches) != 2 {
-		t.Fatalf("move_out must expose exactly prepare/submit branches: %s", moveSchema)
+	if _, hasOneOf := moveSchemaMap["oneOf"]; hasOneOf {
+		t.Fatalf("move_out must not rely on oneOf: %s", moveSchema)
 	}
-	var prepareProperties, submitProperties map[string]any
-	var prepareRequired, submitRequired []any
-	for _, raw := range branches {
-		branch := raw.(map[string]any)
-		properties := branch["properties"].(map[string]any)
-		actionSchema := properties["action"].(map[string]any)
-		action, _ := actionSchema["const"].(string)
-		if action == "" {
-			t.Fatalf("move_out action branch is not discriminated: %+v", branch)
-		}
-		switch action {
-		case "prepare":
-			prepareProperties = properties
-			prepareRequired, _ = branch["required"].([]any)
-		case "submit":
-			submitProperties = properties
-			submitRequired, _ = branch["required"].([]any)
+	moveProperties, _ := moveSchemaMap["properties"].(map[string]any)
+	for _, field := range []string{"action", "purpose", "targets", "confirmation_uuid", "remote_session_id", "idempotency_key"} {
+		if moveProperties[field] == nil {
+			t.Fatalf("move_out schema missing property %q: %s", field, moveSchema)
 		}
 	}
-	for _, field := range []string{"action", "remote_session_id", "purpose", "targets"} {
-		if prepareProperties[field] == nil || !containsSchemaRequired(prepareRequired, field) {
-			t.Fatalf("move_out prepare branch missing required %q: %s", field, moveSchema)
+	if moveProperties["workspace"] != nil || strings.Contains(string(moveSchema), `"kind"`) {
+		t.Fatalf("move_out must let Runtime infer workspace/kind: %s", moveSchema)
+	}
+	actionProp, _ := moveProperties["action"].(map[string]any)
+	actionDesc, _ := actionProp["description"].(string)
+	for _, needle := range []string{"prepare", "submit", "purpose", "targets", "confirmation_uuid"} {
+		if !strings.Contains(actionDesc, needle) {
+			t.Fatalf("move_out action.description missing %q: %s", needle, actionDesc)
 		}
 	}
-	if prepareProperties["workspace"] != nil || containsSchemaRequired(prepareRequired, "idempotency_key") || strings.Contains(string(moveSchema), `"kind"`) {
-		t.Fatalf("move_out prepare must let Runtime infer workspace/kind and make idempotency optional: %s", moveSchema)
+	moveRequired, _ := moveSchemaMap["required"].([]any)
+	if !reflect.DeepEqual(moveRequired, []any{"action"}) {
+		t.Fatalf("move_out required must be exactly [action], got %v", moveRequired)
 	}
-	for _, field := range []string{"action", "remote_session_id", "confirmation_uuid"} {
-		if submitProperties[field] == nil || !containsSchemaRequired(submitRequired, field) {
-			t.Fatalf("move_out submit branch missing required %q: %s", field, moveSchema)
-		}
-	}
-	for _, forbidden := range []string{"workspace", "purpose", "targets", "move_request_id", "manifest_sha256", "idempotency_key"} {
-		if submitProperties[forbidden] != nil {
-			t.Fatalf("move_out submit must bind %q server-side: %s", forbidden, moveSchema)
+	for _, forbidden := range []string{"workspace", "move_request_id", "manifest_sha256"} {
+		if moveProperties[forbidden] != nil {
+			t.Fatalf("move_out must bind %q server-side: %s", forbidden, moveSchema)
 		}
 	}
 	commandSchema, _ := json.Marshal(byName["execute"].InputSchema)
-	for _, required := range []string{"remote_session_id", "purpose"} {
-		if !strings.Contains(string(commandSchema), `"`+required+`"`) {
-			t.Fatalf("execute schema missing %q: %s", required, commandSchema)
+	for _, field := range []string{"remote_session_id", "purpose"} {
+		if !strings.Contains(string(commandSchema), `"`+field+`"`) {
+			t.Fatalf("execute schema missing %q: %s", field, commandSchema)
 		}
 	}
-	if !strings.Contains(string(commandSchema), "scope") {
-		t.Fatalf("execute schema missing scope: %s", commandSchema)
+	var commandSchemaMap map[string]any
+	if err := json.Unmarshal(commandSchema, &commandSchemaMap); err != nil {
+		t.Fatal(err)
+	}
+	if containsSchemaRequired(commandSchemaMap["required"].([]any), "remote_session_id") {
+		t.Fatalf("execute remote_session_id must be optional when transport is bound: %s", commandSchema)
+	}
+	if strings.Contains(string(commandSchema), `"scope"`) {
+		t.Fatalf("execute schema must not expose single-value scope: %s", commandSchema)
 	}
 	contextSchema, _ := json.Marshal(byName["read"].InputSchema)
 	for _, removed := range []string{"pattern", "max_files"} {
@@ -604,7 +609,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	}
 	executeRun := call("execute", map[string]any{
 		"action": "run", "remote_session_id": remoteID, "purpose": "acceptance execute run",
-		"command": "printf acceptance-execute", "scope": "workspace",
+		"command": testPrintCommand("acceptance-execute"),
 	})
 	if !statusOK(executeRun) {
 		t.Fatalf("execute run = %+v", executeRun)
@@ -666,10 +671,15 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	resumed := call("session", map[string]any{"action": "open", "remote_session_id": remoteID})
 	resumedData, _ := resumed["data"].(map[string]any)
 	if resumedData["client_refresh"] != nil || resumedData["omitted_sections"] != nil {
-		t.Fatalf("session re-open must return canonical bootstrap without revision bookkeeping: %+v", resumedData)
+		t.Fatalf("session re-open must not add legacy revision bookkeeping: %+v", resumedData)
 	}
-	if len(asMapSlice(resumedData["tools"])) == 0 || resumedData["instructions"] == nil {
-		t.Fatalf("session re-open must return complete bootstrap facts: %+v", resumedData)
+	if resumedData["revisions"] == nil || resumedData["remote_session"] == nil || resumedData["workspace"] == nil {
+		t.Fatalf("session re-open must preserve dynamic identity and revision facts: %+v", resumedData)
+	}
+	for _, field := range []string{"agent_guidance", "client_protocol", "tools", "instructions", "schema_source", "capability_version", "capability_groups", "recommended_workflows"} {
+		if resumedData[field] != nil {
+			t.Fatalf("session re-open must not repeat static bootstrap field %s: %+v", field, resumedData[field])
+		}
 	}
 
 	// --- A04 nested AGENTS ---
@@ -708,13 +718,13 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		t.Fatalf("batch results: %+v", batchData)
 	}
 	okCount, failCount := 0, 0
-	var demoSHA string
+	var demoRev string
 	for _, raw := range results {
 		item, _ := raw.(map[string]any)
 		if item["ok"] == true {
 			okCount++
 			if item["path"] == "a.go" {
-				demoSHA, _ = item["sha256"].(string)
+				demoRev, _ = item["rev"].(string)
 			}
 		} else {
 			failCount++
@@ -726,8 +736,8 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	// Consistency with single file_read
 	single := call("file_read", map[string]any{"remote_session_id": remoteID, "path": "a.go", "offset": 0, "limit": 20})
 	singleData, _ := single["data"].(map[string]any)
-	if singleData["sha256"] != demoSHA {
-		t.Fatalf("batch sha %q != single %q", demoSHA, singleData["sha256"])
+	if singleData["rev"] != demoRev || demoRev == "" {
+		t.Fatalf("batch rev %q != single %q", demoRev, singleData["rev"])
 	}
 
 	// --- A08 code_search context ---
@@ -744,8 +754,8 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		t.Fatalf("search missed Alpha: %+v", searchData)
 	}
 	match0, _ := matches[0].(map[string]any)
-	if match0["sha256"] == nil || match0["sha256"] == "" {
-		t.Fatalf("search missing sha256: %+v", match0)
+	if match0["rev"] == nil || match0["rev"] == "" || match0["sha256"] != nil {
+		t.Fatalf("search missing compact rev or leaking sha256: %+v", match0)
 	}
 	scopedQuery := call("read", map[string]any{
 		"view": "context", "remote_session_id": remoteID,
@@ -770,29 +780,39 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 
 	// --- A08 command_execute / task_manage short and long command paths ---
 	short := call("command_execute", map[string]any{
-		"remote_session_id": remoteID, "command": "printf short-command", "purpose": "run the short command protocol check", "scope": "workspace",
+		"remote_session_id": remoteID, "command": testPrintCommand("short-command"), "purpose": "run the short command protocol check",
 	})
 	shortData, _ := short["data"].(map[string]any)
 	if shortData["completed_in_call"] != true || shortData["exit_code"] != float64(0) || stringPayload(shortData, "execution_task_id") == "" {
 		t.Fatalf("short command should complete in one call: %+v", short)
 	}
 	long := call("command_execute", map[string]any{
-		"remote_session_id": remoteID, "command": "sleep 0.05", "purpose": "verify short wait task handoff", "scope": "workspace", "yield_time_ms": 1,
+		"remote_session_id": remoteID, "command": testSleepCommand(50 * time.Millisecond), "purpose": "verify short wait task handoff", "yield_time_ms": 1,
 	})
 	longData, _ := long["data"].(map[string]any)
 	longTaskID, _ := longData["execution_task_id"].(string)
 	if longData["completed_in_call"] != false || longTaskID == "" {
 		t.Fatalf("long command should return a unified Task: %+v", long)
 	}
-	attached := call("task_manage", map[string]any{
-		"action": "attach", "remote_session_id": remoteID, "execution_task_id": longTaskID, "yield_time_ms": 1000,
-	})
+	actions, _ := long["actions"].([]any)
+	if len(actions) != 1 {
+		t.Fatalf("running Task must expose one canonical continuation action: %+v", long["actions"])
+	}
+	next, _ := actions[0].(map[string]any)
+	nextArgs, _ := next["arguments"].(map[string]any)
+	if next["id"] == "" || nextArgs["execution_task_id"] != longTaskID || nextArgs["yield_time_ms"] != nil {
+		t.Fatalf("short run yield must not be inherited by continuation: %+v", next)
+	}
+	if nextArgs["stdout_offset"] != longData["stdout_next_offset"] || nextArgs["stderr_offset"] != longData["stderr_next_offset"] {
+		t.Fatalf("continuation offsets must match returned stream offsets: next=%+v data=%+v", nextArgs, longData)
+	}
+	attached := call(next["id"].(string), nextArgs)
 	attachedData, _ := attached["data"].(map[string]any)
 	if attachedData["status"] != "exited" || attachedData["exit_code"] != float64(0) || attachedData["stdout_next_offset"] == nil || attachedData["stderr_next_offset"] == nil {
 		t.Fatalf("task attach must return stream-specific offsets: %+v", attached)
 	}
 	overTen := call("command_execute", map[string]any{
-		"remote_session_id": remoteID, "command": "sleep 11", "purpose": "verify default long-task handoff", "scope": "workspace",
+		"remote_session_id": remoteID, "command": testSleepCommand(11 * time.Second), "purpose": "verify default long-task handoff",
 	})
 	overTenData, _ := overTen["data"].(map[string]any)
 	overTenTaskID, _ := overTenData["execution_task_id"].(string)
@@ -808,13 +828,13 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 
 	// --- A10/A13 clean edit + inline diff summary ---
 	sum := sha256.Sum256([]byte(files["demo.go"]))
-	base := fmt.Sprintf("sha256:%x", sum[:])
+	base := compactFileRevision(fmt.Sprintf("sha256:%x", sum[:]))
 	executed := call("edit", map[string]any{
 		"remote_session_id": remoteID,
 		"idempotency_key":   "edit-idempotency-key",
 		"purpose":           "bump Value",
 		"edits": []any{map[string]any{
-			"operation": "update", "path": "demo.go", "base_sha256": base,
+			"operation": "update", "path": "demo.go", "rev": base,
 			"replacements": []any{map[string]any{"match": "const Value = 1", "replacement": "const Value = 2"}},
 		}},
 	})
@@ -828,12 +848,16 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	if execData["total_changed_lines"] != float64(2) && execData["total_changed_lines"] != 2 {
 		t.Fatalf("unexpected changed line count: %+v", execData)
 	}
-	if diff, _ := execData["diff_summary"].(string); !strings.Contains(diff, "-const Value = 1") || !strings.Contains(diff, "+const Value = 2") {
-		t.Fatalf("inline diff summary missing concrete change: %+v", execData)
+	if execData["diff_summary"] != nil {
+		t.Fatalf("edit response must not duplicate per-file diff as diff_summary: %+v", execData)
 	}
 	editResults, _ := execData["results"].([]any)
 	if len(editResults) != 1 {
 		t.Fatalf("edit results missing: %+v", execData)
+	}
+	editResult, _ := editResults[0].(map[string]any)
+	if diff, _ := editResult["diff"].(string); !strings.Contains(diff, "-const Value = 1") || !strings.Contains(diff, "+const Value = 2") {
+		t.Fatalf("inline per-file diff missing concrete change: %+v", execData)
 	}
 	content, err := os.ReadFile(filepath.Join(workspace, "demo.go"))
 	if err != nil || !strings.Contains(string(content), "Value = 2") {
@@ -841,18 +865,20 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	}
 	replayed := call("edit", map[string]any{
 		"remote_session_id": remoteID, "idempotency_key": "edit-idempotency-key", "purpose": "bump Value",
-		"edits": []any{map[string]any{"operation": "update", "path": "demo.go", "base_sha256": base,
+		"edits": []any{map[string]any{"operation": "update", "path": "demo.go", "rev": base,
 			"replacements": []any{map[string]any{"match": "const Value = 1", "replacement": "const Value = 2"}}}},
 	})
 	replayData, _ := replayed["data"].(map[string]any)
-	if replayData["idempotent_replay"] != true || replayData["diff_summary"] != execData["diff_summary"] {
-		t.Fatalf("edit retry must replay its original result: %+v", replayed)
+	replayResults, _ := replayData["results"].([]any)
+	replayResult, _ := replayResults[0].(map[string]any)
+	if replayData["idempotent_replay"] != true || replayResult["diff"] != editResult["diff"] || replayData["diff_summary"] != nil {
+		t.Fatalf("edit retry must replay its original per-file diff without a duplicate summary: %+v", replayed)
 	}
 	// --- A12 stale revision ---
 	stale := call("edit", map[string]any{
 		"remote_session_id": remoteID, "purpose": "stale",
 		"edits": []any{map[string]any{
-			"operation": "update", "path": "demo.go", "base_sha256": base, // old hash
+			"operation": "update", "path": "demo.go", "rev": base, // old revision
 			"replacements": []any{map[string]any{"match": "const Value = 2", "replacement": "const Value = 3"}},
 		}},
 	})
@@ -872,11 +898,11 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 
 	// --- A11 zero match fails ---
 	freshSum := sha256.Sum256(content)
-	freshBase := fmt.Sprintf("sha256:%x", freshSum[:])
+	freshBase := compactFileRevision(fmt.Sprintf("sha256:%x", freshSum[:]))
 	nomatch := call("edit", map[string]any{
 		"remote_session_id": remoteID, "purpose": "no match", "apply": false,
 		"edits": []any{map[string]any{
-			"operation": "update", "path": "demo.go", "base_sha256": freshBase,
+			"operation": "update", "path": "demo.go", "rev": freshBase,
 			"replacements": []any{map[string]any{"match": "DOES_NOT_EXIST_XYZ", "replacement": "x"}},
 		}},
 	})
@@ -884,13 +910,19 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		t.Fatalf("zero match should fail: %+v", nomatch)
 	}
 
-	for _, removedView := range []string{"changes", "diff"} {
-		removed := call("observe", map[string]any{"remote_session_id": remoteID, "view": removedView})
-		if statusOK(removed) {
-			t.Fatalf("observe must reject removed view %q: %+v", removedView, removed)
-		}
-		if body, _ := removed["error"].(map[string]any); strings.ToUpper(fmt.Sprint(body["code"])) != "INVALID_ARGUMENTS" {
-			t.Fatalf("observe removed view %q must return INVALID_ARGUMENTS before execution: %+v", removedView, removed)
-		}
+	removed := call("observe", map[string]any{"remote_session_id": remoteID, "view": "changes"})
+	if statusOK(removed) {
+		t.Fatalf("observe must reject removed view changes: %+v", removed)
+	}
+	if body, _ := removed["error"].(map[string]any); strings.ToUpper(fmt.Sprint(body["code"])) != "INVALID_ARGUMENTS" {
+		t.Fatalf("observe removed view changes must return INVALID_ARGUMENTS: %+v", removed)
+	}
+	missingDiffID := call("observe", map[string]any{"remote_session_id": remoteID, "view": "diff"})
+	if statusOK(missingDiffID) {
+		t.Fatalf("observe diff without edit_id must fail validation: %+v", missingDiffID)
+	}
+	if body, _ := missingDiffID["error"].(map[string]any); strings.ToUpper(fmt.Sprint(body["code"])) != "EDIT_ID_REQUIRED" {
+		t.Fatalf("observe diff without edit_id must return EDIT_ID_REQUIRED: %+v", missingDiffID)
+
 	}
 }

@@ -292,7 +292,9 @@ func isLiveToolQuery(name string, req *mcp.CallToolRequest) bool {
 	case "skill_tool", "mcp_tool":
 		return action == "list" || action == "describe"
 	case "session":
-		return action == "list" || ((action == "" || action == "open") && stringPayload(mcpresult.Arguments(req), "remote_session_id") != "")
+		// An explicit open without an ID creates a fresh Remote Session;
+		// replaying a prior result can attach a different client to that session.
+		return action == "list" || action == "" || action == "open"
 	default:
 		return false
 	}
@@ -312,6 +314,11 @@ func (r *Runtime) replayDeliver(ctx, clientCtx context.Context, name string, req
 		return nil, false, nil
 	}
 	arguments := mcpresult.Arguments(req)
+	if name == "operation_batch" && stringPayload(arguments, "operation_id") != "" {
+		// The operation store owns this stable submission identity and returns
+		// its current durable state, including across process restarts.
+		return nil, false, nil
+	}
 	key := r.toolReplayKey(name, arguments)
 	if strings.TrimSpace(stringPayload(arguments, "idempotency_key")) != "" {
 		// Keyed calls own a persisted idempotency contract that survives

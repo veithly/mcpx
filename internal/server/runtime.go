@@ -23,6 +23,7 @@ import (
 	"mcpx/internal/artifact"
 	"mcpx/internal/audit"
 	"mcpx/internal/auth"
+	"mcpx/internal/browseruse"
 	"mcpx/internal/config"
 	"mcpx/internal/control"
 	"mcpx/internal/deletion"
@@ -87,17 +88,21 @@ type Runtime struct {
 	consoleCalls      map[string]consoleLiveCall
 	toolReplays       toolReplayCache // reconnect recovery for interrupted tool calls
 	replayPersistWG   sync.WaitGroup  // in-flight durable replay writes, bounded wait on Close
+	browserService    *browseruse.Service
+	sessionBindingMu  sync.RWMutex
+	sessionBindings   map[string]string
 	closeOnce         sync.Once
 	closeErr          error
 
 	// For schema revision and capability catalog.
-	toolIndex         map[string]mcp.Tool
-	toolIndexMu       sync.RWMutex
-	toolHandlers      map[string]mcp.ToolHandler
-	toolMeta          map[string]toolAnnotation
-	toolResponseOnce  sync.Once
-	toolResponseSlots chan struct{}
-	toolRecoverySlots chan struct{}
+	toolIndex          map[string]mcp.Tool
+	toolIndexMu        sync.RWMutex
+	toolHandlers       map[string]mcp.ToolHandler
+	toolMeta           map[string]toolAnnotation
+	toolResponseOnce   sync.Once
+	toolResponseSlots  chan struct{}
+	onToolUnresponsive func(string, string)
+	toolRecoverySlots  chan struct{}
 	// idempotency is shared by clean-core mutating tools and persists replay
 	// records in the Runtime state database.
 	idempotency     *idempotency.Store
@@ -261,6 +266,7 @@ func New(opts Options) (*Runtime, error) {
 		deletions:      deletion.NewStore(stateStore.DB()),
 		retention:      retentionService,
 		screenshot:     screenshot.NewService(),
+		browserService: browseruse.NewService(),
 		toolIndex:      map[string]mcp.Tool{},
 		toolHandlers:   map[string]mcp.ToolHandler{},
 		toolMeta:       map[string]toolAnnotation{},
@@ -402,6 +408,18 @@ const shutdownGracePeriod = toolResponseTimeout + 5*time.Second
 
 // Start serves MCP over Streamable HTTP behind the auth/OAuth gateway.
 func (r *Runtime) Start() error {
+	r.onToolUnresponsive = func(name, requestID string) {
+		logging.With("component", "mcp_tool").Error("tool worker ignored cancellation; restarting runtime",
+			"tool", name, "request_id", requestID)
+		os.Exit(1)
+	}
+	if r.operations != nil {
+		r.operations.SetUnresponsiveHandler(func(input operation.ExecuteInput) {
+			logging.With("component", "operation").Error("executor ignored cancellation; restarting runtime",
+				"operation_id", input.OperationID, "step_id", input.StepID, "tool", input.Tool)
+			os.Exit(1)
+		})
+	}
 	defer r.Close()
 	s := mcp.NewServer(&mcp.Implementation{
 		Name:    "mcpx",
@@ -531,11 +549,17 @@ func (r *Runtime) Close() error {
 		if r.tasks != nil {
 			r.tasks.Close()
 		}
+		if r.browserService != nil {
+			if err := r.browserService.Close(); err != nil && r.closeErr == nil {
+				r.closeErr = err
+			}
+		}
 		// Give detached replay persistence a short bounded window before the
 		// database closes; each write already carries its own timeout.
 		waitReplayPersist(&r.replayPersistWG, toolReplayPersistTimeout)
+
 		if r.state != nil {
-			if err := r.state.Close(); r.closeErr == nil {
+			if err := r.state.Close(); err != nil && r.closeErr == nil {
 				r.closeErr = err
 			}
 		}

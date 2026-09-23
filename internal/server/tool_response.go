@@ -13,6 +13,7 @@ import (
 const toolResponseTimeout = 45 * time.Second
 const toolResponseConcurrency = 32
 const toolRecoveryConcurrency = 8
+const toolWorkerStallGrace = 5 * time.Second
 
 // toolWaitMax caps wait-style arguments (execute yield_time_ms, operation_manage
 // wait timeout_ms) below the synchronous response budget, so a single waiting
@@ -31,6 +32,10 @@ const toolWorkerHardLimit = 2 * toolResponseTimeout
 // occupied until workers actually finish, not until clients give up, so
 // timeouts cannot grow an unbounded set of orphan workers.
 func (r *Runtime) boundedTool(name string, handler mcp.ToolHandler, timeout time.Duration) mcp.ToolHandler {
+	return r.boundedToolWithLimits(name, handler, timeout, toolWorkerHardLimit, toolWorkerStallGrace)
+}
+
+func (r *Runtime) boundedToolWithLimits(name string, handler mcp.ToolHandler, timeout, workerLimit, stallGrace time.Duration) mcp.ToolHandler {
 	r.toolResponseOnce.Do(func() {
 		r.toolResponseSlots = make(chan struct{}, toolResponseConcurrency)
 		r.toolRecoverySlots = make(chan struct{}, toolRecoveryConcurrency)
@@ -76,8 +81,13 @@ func (r *Runtime) boundedTool(name string, handler mcp.ToolHandler, timeout time
 			// of the response and the late worker outcome wins; the pool slot
 			// stays occupied until the worker truly ends.
 			workerCtx := withClientContext(context.WithoutCancel(ctx), ctx)
-			workerCtx, workerCancel := context.WithTimeout(workerCtx, toolWorkerHardLimit)
+			workerCtx, workerCancel := context.WithTimeout(workerCtx, workerLimit)
 			defer workerCancel()
+			finished := make(chan struct{})
+			defer close(finished)
+			if onUnresponsive := r.onToolUnresponsive; onUnresponsive != nil {
+				go watchToolWorker(workerCtx, finished, stallGrace, func() { onUnresponsive(name, rt.RequestID) })
+			}
 			var out *mcp.CallToolResult
 			var callErr error
 			defer func() {
@@ -115,5 +125,23 @@ func (r *Runtime) boundedTool(name string, handler mcp.ToolHandler, timeout time
 			logging.With("component", "mcp_tool").Warn("response deadline or cancellation", "tool", name, "request_id", rt.RequestID, "code", code)
 			return failure(code, message), nil
 		}
+	}
+}
+
+// A detached tool's deadline only cancels its context. If the handler ignores
+// it, the slot stays occupied forever unless the process supervisor restarts
+// the Runtime. A short grace period lets cooperative handlers finish cleanup.
+func watchToolWorker(ctx context.Context, finished <-chan struct{}, grace time.Duration, onUnresponsive func()) {
+	select {
+	case <-finished:
+		return
+	case <-ctx.Done():
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-finished:
+	case <-timer.C:
+		onUnresponsive()
 	}
 }

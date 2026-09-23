@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"mcpx/internal/state"
 )
@@ -90,6 +91,42 @@ func TestSaveToolResultTruncatesOversizedResultInsteadOfRejecting(t *testing.T) 
 	}
 	if !json.Valid(got.Result) {
 		t.Fatal("stored truncated result is not valid JSON")
+	}
+}
+
+func TestSaveToolResultBoundsEscapedOversizedResult(t *testing.T) {
+	db := openObservationTestDB(t)
+	store := NewStore(db.DB())
+	payload, err := json.Marshal(map[string]any{
+		"content": []any{map[string]any{"type": "text", "text": strings.Repeat("\\", MaxToolResultBytes/2)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) <= MaxToolResultBytes {
+		t.Fatalf("fixture payload=%d bytes, want > %d", len(payload), MaxToolResultBytes)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- store.SaveToolResult(context.Background(), PersistedToolResult{
+			RequestID: "req_escaped_oversize", Workspace: "mcpx", Tool: "read", Status: "succeeded",
+			Result: payload,
+		})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("escaped oversized result pinned the observation worker")
+	}
+	got, err := store.GetToolResult(context.Background(), "mcpx", "", "req_escaped_oversize")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Truncated || len(got.Result) > MaxToolResultBytes || !json.Valid(got.Result) {
+		t.Fatalf("recovery result truncated=%v bytes=%d valid=%v", got.Truncated, len(got.Result), json.Valid(got.Result))
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"mcpx/internal/arc"
 	"mcpx/internal/envelope"
 	"mcpx/internal/mcpresult"
 	"mcpx/internal/observation"
@@ -161,7 +162,7 @@ func ensureToolResponse(ctx context.Context, name string, req *mcp.CallToolReque
 		return result
 	}
 	wire, _ := result.StructuredContent.(map[string]any)
-	if result.IsError && wire["timing"] == nil {
+	if result.IsError && (result.Meta == nil || result.Meta[arc.ResultMetadataKey] == nil) {
 		result = wrapFailureResult(ctx, name, result)
 		wire, _ = result.StructuredContent.(map[string]any)
 	}

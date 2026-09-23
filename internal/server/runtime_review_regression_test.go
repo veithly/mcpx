@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"mcpx/internal/envelope"
 	"mcpx/internal/file"
 	"mcpx/internal/idempotency"
+	"mcpx/internal/operation"
 	"mcpx/internal/winproc"
 )
 
@@ -82,7 +84,6 @@ func TestReviewEditCanonicalPolicy(t *testing.T) {
 		})
 	}
 }
-
 
 func TestReviewEditCrashReadbackRecovery(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "review")
@@ -158,3 +159,45 @@ func TestReviewDelayedChild(t *testing.T) {
 	}
 }
 
+func TestReviewCancelStopsActualTaskAndFreezesTerminal(t *testing.T) {
+	rt := newWorkspaceRuntime(t, "review")
+	s := operationTestSession(t, rt, "review")
+	rt.cfg.Security.Commands.Default = "allow"
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := filepath.Join(s.WorkspacePath, "started")
+	late := filepath.Join(s.WorkspacePath, "late")
+	accepted := callOperationTool(t, rt, "execute", map[string]any{"remote_session_id": s.ID, "purpose": "取消真实 Task 回归", "action": "run", "execution_mode": "async", "yield_time_ms": 1, "argv": []any{executable, "-test.run=^TestReviewDelayedChild$", "--", "--review-delayed-child", started, late}, "shell": false})
+	if accepted["status"] != "accepted" {
+		t.Fatalf("未提交: %+v", accepted)
+	}
+	id := acceptedOperationID(accepted)
+	if id == "" {
+		t.Fatalf("operation id missing: %+v", accepted)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("子进程未启动")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	callOperationTool(t, rt, "operation_manage", map[string]any{"remote_session_id": s.ID, "operation_id": id, "action": "cancel"})
+	final, timeout, err := rt.operations.Wait(context.Background(), id, time.Second)
+	if err != nil || timeout || final.State != operation.StateCancelled {
+		t.Fatalf("取消未收敛: %s %v", final.State, err)
+	}
+	time.Sleep(1600 * time.Millisecond)
+	if _, err := os.Stat(late); !os.IsNotExist(err) {
+		t.Fatal("取消终态之后仍产生写入")
+	}
+	after, err := rt.operations.Get(context.Background(), id)
+	if err != nil || !reflect.DeepEqual(final, after) {
+		t.Fatal("终态快照被迟到结果改写")
+	}
+}

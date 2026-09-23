@@ -51,12 +51,23 @@ CGO_ENABLED=0 go build -o bin/mcpx-server ./cmd/mcpx-server
 ## 本机部署与签名（macOS 常驻服务）
 
 - 本机服务由 launchd（`com.mcpx.server`）运行 `~/.mcpx/bin/mcpx-server`；`/opt/homebrew/bin/mcpx` 是仓库 `bin/mcpx-server` 的符号链接，重建即自动更新 CLI。
-- **本机更新安装时，构建后必须立即正确签名，再拷贝与重启；顺序不可颠倒**（`go build` 会覆盖已有签名，adhoc 临时签名每次构建身份都不同，会导致 macOS 反复索要屏幕录制等权限，且系统设置里找不到对应条目）：
+- **本机更新按构建 → 固定身份签名 → 同目录暂存并验证 → 原子替换 → 重启执行**。直接 `cp` 覆盖正在运行的安装路径会复用旧 inode；即使 `codesign --verify` 通过，新程序也可能被 macOS 以 SIGKILL (137) 拒绝执行。`go build` 每次覆盖签名，必须在构建后重新签名：
 
   ```bash
+  set -e
   go build -o bin/mcpx-server ./cmd/mcpx-server
   codesign --force --sign mcpx-local --identifier com.mcpx.server bin/mcpx-server
-  cp bin/mcpx-server ~/.mcpx/bin/mcpx-server
+  installed="$HOME/.mcpx/bin/mcpx-server"
+  staged="$(mktemp "$HOME/.mcpx/bin/mcpx-server.next.XXXXXXXX")"
+  cp -p bin/mcpx-server "$staged"
+  codesign --verify --strict "$staged"
+  codesign -dvvv "$staged" 2>&1 | grep -q '^Identifier=com.mcpx.server$'
+  codesign -dvvv "$staged" 2>&1 | grep -q '^Authority=mcpx-local$'
+  "$staged" -version
+  cp -p "$installed" "$installed.pre-$(date +%Y%m%d%H%M%S)"
+  mv "$staged" "$installed"
+  codesign --verify --strict "$installed"
+  "$installed" -version
   launchctl kickstart -k gui/$(id -u)/com.mcpx.server
   ```
 

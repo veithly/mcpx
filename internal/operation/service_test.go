@@ -2,6 +2,7 @@ package operation
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -337,6 +338,103 @@ func TestStepTimeoutFailsStepAndKeepsWorkerUsable(t *testing.T) {
 	final, waitTimedOut, err = service.Wait(context.Background(), recovered.ID, 2*time.Second)
 	if err != nil || waitTimedOut || final.State != StateSucceeded {
 		t.Fatalf("worker did not recover after timeout: final=%+v waitTimedOut=%v err=%v", final, waitTimedOut, err)
+	}
+}
+
+func TestNonCooperativeStepCannotPinTheWorkerQueue(t *testing.T) {
+	service := newTestService(t, 1)
+	service.stepTimeout = 30 * time.Millisecond
+	service.stallGrace = 20 * time.Millisecond
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	stalled := make(chan ExecuteInput, 1)
+	service.SetUnresponsiveHandler(func(input ExecuteInput) { stalled <- input })
+	finished := make(chan struct{})
+	first, err := service.Submit(context.Background(), SubmitSpec{
+		RemoteSessionID: "session", WorkspaceName: "workspace", RequestID: "noncooperative", Purpose: "worker watchdog",
+		Steps: []StepSpec{{ID: "stuck", Tool: "read"}},
+	}, func(context.Context, ExecuteInput) ExecuteResult {
+		<-release // Deliberately ignores cancellation, as the wedged sanitizer did.
+		close(finished)
+		return ExecuteResult{Result: []byte(`{"late":true}`)}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.Submit(context.Background(), SubmitSpec{
+		RemoteSessionID: "session", WorkspaceName: "workspace", RequestID: "after_stall", Purpose: "queue recovery",
+		Steps: []StepSpec{{ID: "next", Tool: "read"}},
+	}, func(context.Context, ExecuteInput) ExecuteResult {
+		return ExecuteResult{Result: []byte(`{"recovered":true}`)}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case input := <-stalled:
+		if input.OperationID != first.ID || input.StepID != "stuck" {
+			t.Fatalf("wrong stalled step: %+v", input)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unresponsive executor was not reported")
+	}
+	for _, item := range []struct {
+		id   string
+		want State
+	}{{first.ID, StateInterrupted}, {second.ID, StateSucceeded}} {
+		record, timedOut, err := service.Wait(context.Background(), item.id, time.Second)
+		if err != nil || timedOut || record.State != item.want {
+			t.Fatalf("operation %s: state=%s timedOut=%v err=%v", item.id, record.State, timedOut, err)
+		}
+	}
+	close(release)
+	<-finished
+	late, err := service.Get(context.Background(), first.ID)
+	if err != nil || late.State != StateInterrupted {
+		t.Fatalf("late executor changed terminal state: %s, %v", late.State, err)
+	}
+}
+
+func TestTransientSQLiteWriteLockDoesNotLoseQueuedStep(t *testing.T) {
+	service := newTestService(t, 1)
+	var record Record
+	var tx *sql.Tx
+	func() {
+		service.reconcileMu.Lock()
+		defer service.reconcileMu.Unlock()
+		var err error
+		record, err = service.Submit(context.Background(), SubmitSpec{
+			RemoteSessionID: "session", WorkspaceName: "workspace", RequestID: "locked_db", Purpose: "dispatch retry",
+			Steps: []StepSpec{{ID: "read", Tool: "read"}},
+		}, func(context.Context, ExecuteInput) ExecuteResult {
+			return ExecuteResult{Result: []byte(`{"recovered":true}`)}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tx, err = service.db.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`UPDATE principals SET last_seen_at=last_seen_at+1 WHERE id='principal'`); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	t.Cleanup(func() { _ = tx.Rollback() })
+	// Longer than the store's 1.5s busy timeout: the first dispatch write fails.
+	time.Sleep(2 * time.Second)
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	final, timedOut, err := service.Wait(context.Background(), record.ID, 2*time.Second)
+	if err != nil || timedOut || final.State != StateSucceeded {
+		t.Fatalf("queued step was lost after transient SQLite lock: state=%s timedOut=%v err=%v", final.State, timedOut, err)
 	}
 }
 

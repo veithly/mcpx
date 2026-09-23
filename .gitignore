@@ -13,3 +13,6 @@ internal/webui/frontend/node_modules/
 # local product docs (not in repo)
 .superpowers
 .codegraph/
+
+# local workspace MCP client config
+.mcp.json

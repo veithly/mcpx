@@ -145,7 +145,7 @@ func TestEditInDoubtOriginalStateRerunsSameKey(t *testing.T) {
 		"purpose":           "rerun an in-doubt batch whose original state is intact",
 		"idempotency_key":   "rerun-key-1",
 		"edits": []map[string]any{{
-			"path": "rerun.txt", "operation": "update", "base_sha256": digestForTest(original),
+			"path": "rerun.txt", "operation": "update", "rev": compactFileRevision(digestForTest(original)),
 			"replacements": []map[string]any{{"match": "line: one", "replacement": "line: two"}},
 		}},
 	}
@@ -158,7 +158,11 @@ func TestEditInDoubtOriginalStateRerunsSameKey(t *testing.T) {
 	// Seed an in-doubt record whose planned batch never touched the disk:
 	// the workspace still matches the original state, so the same key is
 	// safe to re-execute in place.
-	planned, err := edit.ApplyBatch(edit.BatchRequest{WorkspaceRoot: session.WorkspacePath, Edits: edits, DryRun: true})
+	plannedEdits := append([]edit.FileEdit(nil), edits...)
+	if err := resolveEditRevisions(session.WorkspacePath, plannedEdits); err != nil {
+		t.Fatal(err)
+	}
+	planned, err := edit.ApplyBatch(edit.BatchRequest{WorkspaceRoot: session.WorkspacePath, Edits: plannedEdits, DryRun: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +300,7 @@ func TestEditTransientHookErrorDoesNotPoisonKey(t *testing.T) {
 		"purpose":           "retry after a transient hook failure",
 		"idempotency_key":   "retry-key-1",
 		"edits": []map[string]any{{
-			"path": "retry.txt", "operation": "update", "base_sha256": digestForTest(original),
+			"path": "retry.txt", "operation": "update", "rev": compactFileRevision(digestForTest(original)),
 			"replacements": []map[string]any{{"match": "v1", "replacement": "v2"}},
 		}},
 	}

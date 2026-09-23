@@ -44,18 +44,18 @@ func TestVerificationSameReadSeesChangedUnicodeFile(t *testing.T) {
 	remoteID := opened["remote_session_id"].(string)
 	path := filepath.Join(ws.Path, "中文 file.txt")
 	args := map[string]any{"remote_session_id": remoteID, "path": "中文 file.txt", "view": "file", "mode": "full"}
-	var previousSHA string
+	var previousRev string
 	for _, text := range []string{"第一版\r\n", "第二版\r\n"} {
 		if err := os.WriteFile(path, []byte(text), 0600); err != nil {
 			t.Fatal(err)
 		}
 		result := callEnvelope(t, rt.toolHandlers["read"], context.Background(), args)
 		data, _ := result["data"].(map[string]any)
-		sha := stringPayload(data, "sha256")
-		if !statusOK(result) || data["content"] != text || sha == "" || sha == previousSHA {
+		rev := stringPayload(data, "rev")
+		if !statusOK(result) || data["content"] != text || rev == "" || rev == previousRev || data["sha256"] != nil {
 			t.Fatalf("same read did not return fresh content and revision: %+v", result)
 		}
-		previousSHA = sha
+		previousRev = rev
 	}
 }
 

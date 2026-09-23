@@ -102,13 +102,25 @@ func Sanitize(value any, maxBytes int) (any, bool) {
 	if len(encoded) <= maxBytes {
 		return clean, false
 	}
-	for previewBytes := maxBytes; previewBytes > 0; previewBytes-- {
-		preview := truncateUTF8(string(encoded), previewBytes)
+	// JSON escaping can make a preview much larger than its source text.
+	// Search the fitting prefix in logarithmic steps rather than encoding and
+	// retrying every byte (millions of multi-megabyte marshals for '\\'-heavy output).
+	text := string(encoded)
+	var best map[string]any
+	for low, high := 0, maxBytes; low <= high; {
+		previewBytes := low + (high-low)/2
+		preview := truncateUTF8(text, previewBytes)
 		candidate := map[string]any{"truncated": true, "preview": preview}
 		candidateBytes, marshalErr := json.Marshal(candidate)
 		if marshalErr == nil && len(candidateBytes) <= maxBytes {
-			return candidate, true
+			best = candidate
+			low = previewBytes + 1
+		} else {
+			high = previewBytes - 1
 		}
+	}
+	if best != nil {
+		return best, true
 	}
 	return map[string]any{"truncated": true}, true
 }

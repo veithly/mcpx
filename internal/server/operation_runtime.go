@@ -50,6 +50,7 @@ func (r *Runtime) submitAsyncTool(ctx context.Context, name string, req *mcp.Cal
 	}
 	arguments := cloneArguments(mcpresult.Arguments(req))
 	delete(arguments, "execution_mode")
+	delete(arguments, "purpose") // The Operation owns intent; inject it only into child tools that accept it.
 	record, err := r.operations.Submit(ctx, operation.SubmitSpec{
 		RemoteSessionID: session.ID,
 		WorkspaceName:   session.WorkspaceName,
@@ -168,6 +169,15 @@ func (r *Runtime) waitForOperationTask(ctx context.Context, input operation.Exec
 func resultTaskID(result *mcp.CallToolResult) string {
 	if result == nil {
 		return ""
+	}
+	// Current ARC responses keep business data in structuredContent while
+	// metadata omits it to avoid duplicating large tool results.
+	if wire, ok := result.StructuredContent.(map[string]any); ok {
+		if data, ok := wire["data"].(map[string]any); ok {
+			if taskID := strings.TrimSpace(findStringValue(data, "execution_task_id")); strings.HasPrefix(taskID, "task_") {
+				return taskID
+			}
+		}
 	}
 	if result.Meta != nil {
 		if metadata, ok := result.Meta[arc.ResultMetadataKey]; ok {

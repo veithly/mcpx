@@ -249,3 +249,40 @@ func TestInterruptedTaskOutcomeIsErrorEnvelope(t *testing.T) {
 		t.Fatalf("interrupted re-run arguments = %+v", arguments)
 	}
 }
+
+func TestDetachedToolWorkerReportsIgnoredDeadline(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	stalled := make(chan string, 1)
+	rt := &Runtime{onToolUnresponsive: func(name, requestID string) { stalled <- name }}
+	handler := rt.boundedToolWithLimits("stuck_read", func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		<-release // Deliberately ignores the worker deadline.
+		return mcpresult.NewText("late"), nil
+	}, 10*time.Millisecond, 25*time.Millisecond, 20*time.Millisecond)
+	result, err := handler(context.Background(), mcpresult.Request(map[string]any{"view": "list"}))
+	if err != nil || !result.IsError {
+		t.Fatalf("expected bounded response timeout: result=%+v err=%v", result, err)
+	}
+	select {
+	case name := <-stalled:
+		if name != "stuck_read" {
+			t.Fatalf("wrong stalled tool: %q", name)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("detached worker did not report ignored deadline")
+	}
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for len(rt.toolResponseSlots) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(rt.toolResponseSlots) != 0 {
+		t.Fatal("detached worker failed to release its slot")
+	}
+}
