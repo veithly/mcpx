@@ -14,6 +14,12 @@ func configureProcess(cmd *exec.Cmd) {
 	winproc.ConfigureNoWindow(cmd)
 }
 
+func killProcessTree(cmd *exec.Cmd) {
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+}
+
 func processCPUTime(int) (time.Duration, bool) {
 	return 0, false
 }
