@@ -37,15 +37,13 @@ func Exec(ctx context.Context, opts ExecOptions) (Result, error) {
 
 	var cmd *exec.Cmd
 	if opts.Executable != "" {
-		cmd = exec.CommandContext(ctx, opts.Executable, opts.Args...)
+		cmd = commandProcess(ctx, opts.Executable, opts.Args...)
 	} else {
 		cmd = commandShell(ctx, opts.Command)
 	}
 	configureProcess(cmd)
 	cmd.Dir = opts.WorkDir
-	if len(opts.ExtraEnv) > 0 {
-		cmd.Env = append(cmd.Environ(), opts.ExtraEnv...)
-	}
+	cmd.Env = append(commandEnvironment(cmd), opts.ExtraEnv...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

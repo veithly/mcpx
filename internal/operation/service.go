@@ -37,9 +37,9 @@ const defaultStallGrace = 5 * time.Second
 var ErrStepTimeout = errors.New("RUNTIME_STEP_TIMEOUT")
 
 var (
+	ErrAlreadyCompleted = errors.New("operation already completed")
 	ErrNotFound         = errors.New("operation not found")
 	ErrInvalidSpec      = errors.New("invalid operation specification")
-	ErrAlreadyCompleted = errors.New("operation already completed")
 	ErrNotActive        = errors.New("operation is not active")
 	ErrConfirmation     = errors.New("confirmation token does not match")
 	ErrResultExpired    = errors.New("operation result expired; submission must not be replayed")
@@ -405,7 +405,8 @@ func (s *Service) Cancel(ctx context.Context, operationID string) (Record, error
 		return Record{}, err
 	}
 	if record.State.terminal() {
-		return Record{}, ErrAlreadyCompleted
+		// Cancellation may race with completion; preserve the durable outcome.
+		return record, nil
 	}
 	s.mu.Lock()
 	active := s.active[operationID]

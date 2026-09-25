@@ -371,6 +371,14 @@ func exitCodeFromData(value any, depth int) (int, bool) {
 	}
 	switch typed := value.(type) {
 	case map[string]any:
+		// A batch may contain successful command steps before the failed step.
+		// Their exit codes do not describe the failure (which may be a file edit
+		// with no process exit code at all).
+		for _, key := range []string{"state", "status"} {
+			if typed[key] == "succeeded" {
+				return 0, false
+			}
+		}
 		if raw, exists := typed["exit_code"]; exists {
 			switch code := raw.(type) {
 			case int:
@@ -387,8 +395,10 @@ func exitCodeFromData(value any, depth int) (int, bool) {
 				return int(code), true
 			}
 		}
-		for _, child := range typed {
-			if code, ok := exitCodeFromData(child, depth+1); ok {
+		// Follow only result containers, in a deterministic order. Arbitrary
+		// payload fields can contain unrelated historical exit codes.
+		for _, key := range []string{"steps", "operations", "results", "items", "result", "structuredContent", "data"} {
+			if code, ok := exitCodeFromData(typed[key], depth+1); ok {
 				return code, true
 			}
 		}

@@ -334,6 +334,7 @@ func (m *TaskManager) StartRemoteProcessWithObservationContext(requestID, callID
 }
 
 func (m *TaskManager) startPrepared(requestID, callID, tool, remoteSessionID, workspaceName, workDir, command string, cmd *exec.Cmd, cancel context.CancelFunc, interactive bool, stdinContent string, wallLimit, cpuLimit time.Duration) (*Task, error) {
+	cmd.Env = commandEnvironment(cmd)
 	m.mu.Lock()
 	if len(m.tasks) >= 256 {
 		m.pruneFinishedLocked(128)

@@ -174,7 +174,21 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 		}()
 		for _, validate := range validators {
 			if validationErr := validate(req); validationErr != nil {
-				return toolFailure(ctx, name, req, "INVALID_ARGUMENTS", validationErr.Error(), nil), nil
+				message := validationErr.Error()
+				if name == "edit" {
+					message += "; edit update/rename requires rev returned by read. Refresh tools/list or reconnect the connector if its tool definition differs."
+				}
+				failure := toolFailure(ctx, name, req, "INVALID_ARGUMENTS", message, nil)
+				wire := failure.StructuredContent.(map[string]any)
+				details := wire["error"].(map[string]any)["details"].(map[string]any)
+				details["tool_schema_revision"] = r.currentToolSchemaRevision()
+				details["schema_source"] = "tools/list"
+				if !isOperationChild(ctx) {
+					runtime, _ := runtimeContextFrom(ctx)
+					now := time.Now()
+					logToolCall(name, runtime, "error", makeInteractionTiming(now.UnixMilli(), now, now), failure)
+				}
+				return failure, nil
 			}
 		}
 		operatorAcks := mcpresult.Arguments(req)["acknowledge_requests"]
@@ -309,7 +323,7 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 			finishRecord()
 		}
 		if !internalOperationStep {
-			logToolCall(name, runtime, status, timing)
+			logToolCall(name, runtime, status, timing, result)
 		}
 		return result, err
 	}
@@ -492,7 +506,7 @@ func makeInteractionTiming(startedAtMs int64, received, completed time.Time) int
 	}
 }
 
-func logToolCall(name string, runtime RuntimeContext, status string, timing interactionTiming) {
+func logToolCall(name string, runtime RuntimeContext, status string, timing interactionTiming, result *mcp.CallToolResult) {
 	fields := []any{
 		"tool", name, "status", status,
 		"request_id", runtime.RequestID, "trace_id", runtime.TraceID, "span_id", runtime.SpanID,
@@ -502,6 +516,18 @@ func logToolCall(name string, runtime RuntimeContext, status string, timing inte
 	}
 	if runtime.ClientName != "" {
 		fields = append(fields, "client_name", runtime.ClientName, "client_version", runtime.ClientVersion)
+	}
+	// Record only classification fields, never arguments, output or credentials.
+	if result != nil {
+		if wire, ok := result.StructuredContent.(map[string]any); ok {
+			if failure, ok := wire["error"].(map[string]any); ok {
+				for _, key := range []string{"code", "category"} {
+					if value, ok := failure[key].(string); ok {
+						fields = append(fields, "error_"+key, value)
+					}
+				}
+			}
+		}
 	}
 	logging.With("component", "mcp_tool").Info("call", fields...)
 }

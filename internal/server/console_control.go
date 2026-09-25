@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"time"
 
@@ -92,9 +91,11 @@ func (c *consoleHandler) stopSession(ctx context.Context, workspace, session, ta
 			failures = append(failures, "cannot enumerate operations")
 		} else {
 			for _, id := range ids {
-				if _, err = c.runtime.operations.Cancel(ctx, id); err == nil {
-					cancelled = append(cancelled, id)
-				} else if !errors.Is(err, operation.ErrAlreadyCompleted) {
+				if record, cancelErr := c.runtime.operations.Cancel(ctx, id); cancelErr == nil {
+					if record.State == operation.StateCancelled {
+						cancelled = append(cancelled, id)
+					}
+				} else {
 					failures = append(failures, "cannot cancel operation "+id)
 				}
 			}

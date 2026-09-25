@@ -488,6 +488,11 @@ func applyReplacements(logical string, reps []Replacement, path string, fileInde
 	}
 	var hits []hit
 	for i, r := range reps {
+		// The source has already been decoded to logical LF text. Match and
+		// replacement must use the same representation before byte offsets are
+		// calculated; encoding back to the original format happens after editing.
+		r.Match = normalizeNewlines(r.Match)
+		r.Replacement = normalizeNewlines(r.Replacement)
 		if r.Match == "" {
 			return "", &ApplyError{Code: "INVALID_INPUT", Message: "match required", Path: path, Index: i, Err: ErrInvalidInput}
 		}

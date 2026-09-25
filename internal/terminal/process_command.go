@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 func commandProcess(ctx context.Context, executable string, args ...string) *exec.Cmd {
@@ -16,6 +17,37 @@ func commandProcess(ctx context.Context, executable string, args ...string) *exe
 		fallbackDirs = []string{"/opt/homebrew/bin", "/usr/local/bin"}
 	}
 	return commandProcessWithFallback(ctx, executable, args, fallbackDirs)
+}
+
+// commandEnvironment keeps executable lookup consistent for the process and
+// its children, including /usr/bin/env shebangs under launchd. Apply it after
+// cmd.Dir is set so Cmd.Environ also supplies the correct PWD.
+func commandEnvironment(cmd *exec.Cmd) []string {
+	env := cmd.Environ()
+	if runtime.GOOS != "darwin" {
+		return env
+	}
+	for i, entry := range env {
+		if !strings.HasPrefix(entry, "PATH=") {
+			continue
+		}
+		paths := filepath.SplitList(strings.TrimPrefix(entry, "PATH="))
+		for _, fallback := range []string{"/opt/homebrew/bin", "/usr/local/bin"} {
+			found := false
+			for _, path := range paths {
+				if path == fallback {
+					found = true
+					break
+				}
+			}
+			if !found {
+				paths = append(paths, fallback)
+			}
+		}
+		env[i] = "PATH=" + strings.Join(paths, ":")
+		return env
+	}
+	return append(env, "PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin")
 }
 
 func commandProcessWithFallback(ctx context.Context, executable string, args, fallbackDirs []string) *exec.Cmd {
