@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -31,7 +32,11 @@ func (r *Runtime) toolScreenshotCapture(ctx context.Context, req *mcp.CallToolRe
 	}
 	captured, err := r.screenshot.Capture(ctx, request)
 	if err != nil {
-		response := envelope.Fail(envelope.StatusError, envReq.RequestID, session.WorkspaceName, nil, "screenshot_error", err.Error())
+		code := "SCREENSHOT_ERROR"
+		if errors.Is(err, screenshot.ErrInvalidRequest) {
+			code = "INVALID_ARGUMENTS"
+		}
+		response := envelope.Fail(envelope.StatusError, envReq.RequestID, session.WorkspaceName, nil, code, err.Error())
 		response.RemoteSessionID = session.ID
 		return r.resultJSON(response)
 	}

@@ -1,16 +1,14 @@
 package server
 
 import (
-	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
-	"mcpx/internal/operation"
 	"mcpx/internal/winproc"
 )
 
@@ -53,24 +51,19 @@ func TestReviewProcessTreeFixtureChild(t *testing.T) {
 }
 
 func TestReviewCancelStopsGrandchildEffects(t *testing.T) {
-	for _, mode := range []string{"redirected", "inherited", "parent-exits"} {
+	for _, mode := range []string{"redirected", "inherited"} {
 		t.Run(mode, func(t *testing.T) {
-			rt := newWorkspaceRuntime(t, "tree")
-			s := operationTestSession(t, rt, "tree")
-			rt.cfg.Security.Commands.Default = "allow"
+			rt, remote, root, call := programmingFixture(t)
 			executable, err := os.Executable()
 			if err != nil {
 				t.Fatal(err)
 			}
-			ready := filepath.Join(s.WorkspacePath, "ready")
-			late := filepath.Join(s.WorkspacePath, "late")
-			accepted := callOperationTool(t, rt, "execute", map[string]any{"remote_session_id": s.ID, "purpose": "进程树取消故障复现", "action": "run", "execution_mode": "async", "yield_time_ms": 1, "argv": []any{executable, "-test.run=^TestReviewProcessTreeFixtureChild$", "--", "--review-process-tree", mode, ready, late}, "shell": false})
-			if accepted["status"] != "accepted" {
-				t.Fatalf("未提交: %+v", accepted)
-			}
-			id := acceptedOperationID(accepted)
-			if id == "" {
-				t.Fatalf("operation id missing: %+v", accepted)
+			ready, late := filepath.Join(root, "ready"), filepath.Join(root, "late")
+			quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+			command := quote(executable) + " -test.run=^TestReviewProcessTreeFixtureChild$ -- --review-process-tree " + mode + " " + quote(ready) + " " + quote(late)
+			result := call("exec_command", map[string]any{"cmd": command, "shell": "/bin/sh", "login": false, "tty": true, "yield_time_ms": 250})
+			if result.IsError {
+				t.Fatal(result)
 			}
 			deadline := time.Now().Add(time.Second)
 			for {
@@ -78,32 +71,22 @@ func TestReviewCancelStopsGrandchildEffects(t *testing.T) {
 					break
 				}
 				if time.Now().After(deadline) {
-					t.Fatal("孙进程未启动")
+					t.Fatal("grandchild did not start")
 				}
 				time.Sleep(5 * time.Millisecond)
 			}
-			callOperationTool(t, rt, "operation_manage", map[string]any{"remote_session_id": s.ID, "operation_id": id, "action": "cancel"})
-			final, timeout, err := rt.operations.Wait(context.Background(), id, time.Second)
-			pidBytes, pidErr := os.ReadFile(ready)
-			pid, parseErr := strconv.Atoi(string(pidBytes))
-			if pidErr != nil || parseErr != nil {
-				t.Fatal("缺少孙进程身份")
+			rt.processMu.Lock()
+			client := rt.processClients[remote]
+			rt.processMu.Unlock()
+			if client == nil {
+				t.Fatal("missing upstream client")
 			}
-			alive, aliveErr := fixtureProcessAlive(pid)
-			if aliveErr != nil || alive {
-				t.Fatalf("取消后孙进程仍存活或无法核对: alive=%v err=%v", alive, aliveErr)
+			if err := client.Close(); err != nil {
+				t.Fatal(err)
 			}
-			// 无论断言如何，等待隔离子进程走完固定生命周期后再清理 fixture。
 			time.Sleep(1600 * time.Millisecond)
-			if err != nil || timeout || final.State != operation.StateCancelled {
-				t.Fatalf("取消未收敛: %s %v", final.State, err)
-			}
 			if _, err := os.Stat(late); !os.IsNotExist(err) {
-				t.Fatal("Operation cancelled 后孙进程仍产生文件效果")
-			}
-			stable, err := rt.operations.Get(context.Background(), id)
-			if err != nil || !reflect.DeepEqual(final, stable) {
-				t.Fatal("取消终态后仍被更改")
+				t.Fatal("Native process close left grandchild effects")
 			}
 		})
 	}

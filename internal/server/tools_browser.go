@@ -452,6 +452,11 @@ func browserServiceCommand(action string, payload map[string]any) (map[string]an
 		}
 		nodeID := strings.TrimSpace(stringPayload(payload, "node_id"))
 		if nodeID != "" {
+			for _, field := range []string{"keys", "button", "x", "y"} {
+				if _, present := payload[field]; present {
+					return nil, fmt.Errorf("%s with node_id does not support %s; use coordinate x/y mode for modified clicks", action, field)
+				}
+			}
 			typeName := "dom_cua_click"
 			if action == "double_click" {
 				typeName = "dom_cua_double_click"
@@ -472,6 +477,9 @@ func browserServiceCommand(action string, payload map[string]any) (map[string]an
 		}
 		typeName := "cua_click"
 		if action == "double_click" {
+			if _, present := payload["button"]; present {
+				return nil, fmt.Errorf("double_click does not support button")
+			}
 			typeName = "cua_double_click"
 		}
 		result := map[string]any{"type": typeName, "tab_id": value, "x": x, "y": y}

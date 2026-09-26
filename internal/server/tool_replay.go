@@ -18,14 +18,14 @@ import (
 // Network-interruption tolerance for tool calls: a dropped tunnel cancels the
 // client's request context mid-call, which used to abort in-flight work and
 // leave the outcome unknown. Tools now run detached and finish recording, and
-// an identical retry within toolReplayTTL receives the recorded outcome with a
-// replay marker instead of racing a duplicate execution. Re-executing on
-// purpose requires the caller to set rerun=true.
+// an identical retry of an interrupted call within toolReplayTTL receives the
+// recorded outcome. Normal completed calls do not memoize future work: a test
+// rerun after changing its inputs is a new execution.
 //
 // Finished entries are also persisted to SQLite so the same retry after a
 // process restart replays the recorded outcome instead of re-executing the
-// side effects; restored entries are always treated as interrupted because the
-// restart itself severed the original client connection.
+// side effects. Only interrupted outcomes are restored; a restart does not
+// retroactively interrupt a call that already returned.
 
 const toolReplayTTL = 10 * time.Minute
 const toolReplayMaxEntries = 512
@@ -36,13 +36,13 @@ const toolReplayPersistTimeout = 3 * time.Second
 
 // replayDigestExcluded arguments differ between a call and its reconnect retry
 // without changing the executed effect, so they are excluded from the replay
-// identity. rerun must always be excluded: it opts out of replay entirely.
+// identity.
 // call_id/callId and confirmation_token identify a single transport attempt or
 // confirmation round, so they never participate in the business identity.
 var replayDigestExcluded = map[string]bool{
 	"purpose": true, "activity": true, "intent": true,
-	"acknowledge_requests": true, "rerun": true,
-	"call_id": true, "callId": true, "confirmation_token": true,
+	"acknowledge_requests": true,
+	"call_id":              true, "callId": true, "confirmation_token": true,
 }
 
 type replayEntry struct {
@@ -83,13 +83,14 @@ func (c *toolReplayCache) begin(key string) (entry *replayEntry, owned bool) {
 	if existing, ok := c.entries[key]; ok {
 		select {
 		case <-existing.done:
-			if existing.result != nil && time.Since(existing.completedAt) <= toolReplayTTL {
+			if existing.interrupted && existing.result != nil && time.Since(existing.completedAt) <= toolReplayTTL {
 				return existing, false
 			}
 		default:
 			return existing, false
 		}
 	}
+	c.removeLocked(key)
 	entry = &replayEntry{done: make(chan struct{})}
 	c.entries[key] = entry
 	c.order = append(c.order, key)
@@ -98,9 +99,8 @@ func (c *toolReplayCache) begin(key string) (entry *replayEntry, owned bool) {
 }
 
 // beginFresh registers a new running entry, replacing a finished one so an
-// explicit re-execution (rerun=true, or an operator-acknowledging call) re-records
-// the identity for later retries. An in-flight entry is never replaced: the
-// caller then runs unowned and must not finish the entry.
+// operator-acknowledging call re-records the identity for later retries. An
+// in-flight entry is never replaced: the caller must join it.
 func (c *toolReplayCache) beginFresh(key string) (*replayEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -114,6 +114,7 @@ func (c *toolReplayCache) beginFresh(key string) (*replayEntry, bool) {
 			return existing, false
 		}
 	}
+	c.removeLocked(key)
 	entry := &replayEntry{done: make(chan struct{})}
 	c.entries[key] = entry
 	c.order = append(c.order, key)
@@ -148,8 +149,7 @@ func (e *replayEntry) setIdentity(key, tool string, arguments map[string]any) {
 }
 
 // restore re-arms a persisted finished entry after a process restart. Restored
-// entries always count as interrupted: the restart itself proves the original
-// client connection was severed, so the client must keep the choice to rerun.
+// entries were selected by loadToolReplays as interrupted outcomes.
 func (c *toolReplayCache) restore(key string, result *mcp.CallToolResult, completedAt time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -303,10 +303,8 @@ func isLiveToolQuery(name string, req *mcp.CallToolRequest) bool {
 // replayDeliver resolves an identical retry of a previous attempt. It returns
 // the entry this caller must finish (only when it registered a fresh one) plus
 // delivered=true with a result that must be returned without executing:
-// a finished entry's recorded outcome is authoritative regardless of whether
-// the original client stayed attached, and concurrent identical calls wait for
-// the single execution instead of racing a duplicate. rerun=true still forces
-// a fresh execution. acknowledges marks a call that acknowledges operator
+// interrupted outcomes and concurrent identical calls join the single
+// execution instead of racing duplicates. acknowledges marks operator
 // requests: it is a new conversational step, so it always executes and
 // re-records the identity.
 func (r *Runtime) replayDeliver(ctx, clientCtx context.Context, name string, req *mcp.CallToolRequest, acknowledges bool) (entry *replayEntry, delivered bool, result *mcp.CallToolResult) {
@@ -314,6 +312,19 @@ func (r *Runtime) replayDeliver(ctx, clientCtx context.Context, name string, req
 		return nil, false, nil
 	}
 	arguments := mcpresult.Arguments(req)
+	// The model may omit the session after transport binding. Resolve that
+	// identity before deduplication, otherwise identical commands from distinct
+	// workspaces share a replay key and can receive each other's result.
+	if runtime, ok := runtimeContextFrom(ctx); ok && runtime.TransportSessionID != "" && strings.TrimSpace(stringPayload(arguments, "remote_session_id")) == "" {
+		principal, err := r.principalFromContext(ctx)
+		if err != nil {
+			return nil, false, nil
+		}
+		if sessionID := r.boundRemoteSessionID(ctx, principal); sessionID != "" {
+			arguments = cloneArguments(arguments)
+			arguments["remote_session_id"] = sessionID
+		}
+	}
 	if name == "operation_batch" && stringPayload(arguments, "operation_id") != "" {
 		// The operation store owns this stable submission identity and returns
 		// its current durable state, including across process restarts.
@@ -326,19 +337,12 @@ func (r *Runtime) replayDeliver(ctx, clientCtx context.Context, name string, req
 		// not shadow it.
 		return nil, false, nil
 	}
+	var owned bool
 	if acknowledges {
-		if owned, ok := r.toolReplays.beginFreshTracked(key, name, arguments); ok {
-			return owned, false, nil
-		}
-		return nil, false, nil
+		entry, owned = r.toolReplays.beginFreshTracked(key, name, arguments)
+	} else {
+		entry, owned = r.toolReplays.beginTracked(key, name, arguments)
 	}
-	if value, _ := arguments["rerun"].(bool); value {
-		if owned, ok := r.toolReplays.beginFreshTracked(key, name, arguments); ok {
-			return owned, false, nil
-		}
-		return nil, false, nil
-	}
-	entry, owned := r.toolReplays.beginTracked(key, name, arguments)
 	if owned {
 		return entry, false, nil
 	}
@@ -381,15 +385,15 @@ func (r *Runtime) replayedResult(entry *replayEntry) *mcp.CallToolResult {
 	var reason string
 	switch {
 	case entry.restored:
-		reason = "service restart recovery; the original attempt completed before the restart. To re-execute on purpose, resend identical arguments with rerun=true."
+		reason = "service restart recovery; the interrupted attempt completed before the restart."
 	case entry.interrupted:
-		reason = "network interruption recovery; the original attempt completed after its connection was lost. To re-execute on purpose, resend identical arguments with rerun=true."
+		reason = "network interruption recovery; the original attempt completed after its response was interrupted."
 	default:
 		reason = "prior attempt already completed"
 	}
 	mcpresult.MetaSet(&replayed, "replayed", true)
 	mcpresult.MetaSet(&replayed, "replay_reason", reason)
-	replayed.Content = append(replayed.Content, &mcp.TextContent{Text: "【回放先前尝试】该调用与上一次已完成的尝试完全相同，以上为服务端记录结果（10 分钟内有效），未重新执行。若确要重新执行，请原样重发并把参数 rerun 设为 true。"})
+	replayed.Content = append(replayed.Content, &mcp.TextContent{Text: "【回放先前尝试】以上为同一在途或响应中断尝试的服务端记录结果，未重复执行。先核对记录的副作用；若明确需要新的执行，使用工具支持的新 idempotency_key。"})
 	return &replayed
 }
 
@@ -403,7 +407,7 @@ func inFlightReplayFailure(ctx context.Context, name string, req *mcp.CallToolRe
 		if body, ok := wire["error"].(map[string]any); ok {
 			if details, ok := body["details"].(map[string]any); ok {
 				details["execution_state"] = "not_started"
-				details["retry_hint"] = "Wait for the running attempt to finish, then resend identical arguments to receive its recorded result, or set rerun=true to force a new execution."
+				details["retry_hint"] = "Wait for the running attempt to finish and inspect its recorded outcome before submitting new work; do not duplicate in-flight side effects."
 			}
 		}
 	}
@@ -462,7 +466,8 @@ func (r *Runtime) saveToolReplay(ctx context.Context, key, tool, session, worksp
         ON CONFLICT(replay_digest) DO UPDATE SET
           result_json = excluded.result_json,
           interrupted = excluded.interrupted,
-          created_at = excluded.created_at`,
+          created_at = excluded.created_at
+        WHERE excluded.created_at >= tool_replays.created_at`,
 		key, session, workspace, tool, string(encoded), interrupted, completedAt.UTC().UnixMilli()); err != nil {
 		return err
 	}
@@ -486,7 +491,7 @@ func (r *Runtime) loadToolReplays(ctx context.Context) {
 	}
 	cutoff := time.Now().Add(-toolReplayTTL).UTC().UnixMilli()
 	rows, err := r.state.DB().QueryContext(ctx, `SELECT replay_digest, result_json, created_at
-        FROM tool_replays WHERE created_at > ? ORDER BY created_at DESC LIMIT ?`,
+        FROM tool_replays WHERE interrupted = 1 AND created_at > ? ORDER BY created_at DESC LIMIT ?`,
 		cutoff, toolReplayMaxEntries)
 	if err != nil {
 		logging.With("component", "tool_replay").Error("restore replay cache failed", "error", err)

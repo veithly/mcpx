@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestCommonSuggestedActionsFitPublicSchemas(t *testing.T) {
@@ -17,13 +15,13 @@ func TestCommonSuggestedActionsFitPublicSchemas(t *testing.T) {
 	}{
 		{name: "workspace recovery", action: nextAction("workspace", map[string]any{})},
 		{name: "session recovery", action: nextAction("session", map[string]any{"workspace": "demo"})},
-		{name: "file continuation", action: nextAction("read", map[string]any{"remote_session_id": "rs_1", "path": "a.go", "offset": 100, "limit": 100})},
-		{name: "context continuation", action: nextAction("context_query", map[string]any{"remote_session_id": "rs_1", "action": "query", "query": "needle", "mode": "smart", "cursor": "next"})},
-		{name: "task continuation", action: nextAction("execute", map[string]any{"remote_session_id": "rs_1", "action": "attach", "execution_task_id": "task_1", "stdout_offset": 10, "stderr_offset": 20})},
+		{name: "source search", action: nextAction("exec_command", map[string]any{"remote_session_id": "rs_1", "cmd": "rg -n needle ."})},
+		{name: "source window", action: nextAction("exec_command", map[string]any{"cmd": "sed -n '100,200p' a.go"})},
+		{name: "process continuation", action: nextAction("write_stdin", map[string]any{"remote_session_id": "rs_1", "session_id": 42, "yield_time_ms": 10000})},
 		{name: "task logs", action: nextAction("observe", map[string]any{"remote_session_id": "rs_1", "view": "logs", "execution_task_id": "task_1", "stdout_offset": 10, "stderr_offset": 20})},
-		{name: "environment snapshot", action: nextAction("environment_inspect", map[string]any{"remote_session_id": "rs_1", "save_snapshot": true})},
-		{name: "environment compare", action: nextAction("environment_inspect", map[string]any{"workspace": "demo", "action": "compare", "compare_to": "env_1"})},
-		{name: "legacy task status", action: nextAction("task_manage", map[string]any{"remote_session_id": "rs_1", "action": "status", "execution_task_id": "task_1"})},
+		{name: "environment snapshot", action: nextAction("environment", map[string]any{"remote_session_id": "rs_1"})},
+		{name: "environment compare", action: nextAction("environment_read", map[string]any{"workspace": "demo", "view": "compare", "snapshot_id": "env_1"})},
+		{name: "management task status", action: nextAction("observe", map[string]any{"remote_session_id": "rs_1", "view": "task", "execution_task_id": "task_1"})},
 		{name: "artifact continuation", action: nextAction("artifact", map[string]any{"remote_session_id": "rs_1", "action": "read", "artifact_id": "art_1", "offset": 1024, "limit": 1024})},
 	}
 	for _, tt := range cases {
@@ -32,15 +30,6 @@ func TestCommonSuggestedActionsFitPublicSchemas(t *testing.T) {
 		})
 	}
 
-	contextAction := cases[3].action
-	contextArgs := contextAction["arguments"].(map[string]any)
-	if contextAction["tool"] != "read" || contextArgs["view"] != "context" || contextArgs["search_mode"] != "smart" || contextArgs["mode"] != nil {
-		t.Fatalf("context continuation was not normalized to read semantics: %+v", contextAction)
-	}
-	snapshotArgs := cases[6].action["arguments"].(map[string]any)
-	if cases[6].action["tool"] != "environment" || snapshotArgs["action"] != nil || snapshotArgs["save_snapshot"] != nil {
-		t.Fatalf("environment snapshot continuation retains deleted protocol fields: %+v", cases[6].action)
-	}
 }
 
 func assertSuggestedActionFitsPublicSchema(t *testing.T, rt *Runtime, action map[string]any) {
@@ -91,5 +80,3 @@ func requiredFields(schema map[string]any) []string {
 	}
 	return result
 }
-
-var _ mcp.Tool

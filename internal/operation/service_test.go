@@ -102,8 +102,9 @@ func TestServiceSkipsDescendantsAfterFailure(t *testing.T) {
 	record, err := service.Submit(context.Background(), SubmitSpec{
 		RemoteSessionID: "session", WorkspaceName: "workspace", RequestID: "request", Purpose: "test failure",
 		Steps: []StepSpec{
-			{ID: "fail", Tool: "source_read"},
+			{ID: "grandchild", Tool: "read", DependsOn: []string{"child"}},
 			{ID: "child", Tool: "source_read", DependsOn: []string{"fail"}},
+			{ID: "fail", Tool: "source_read"},
 		},
 	}, func(ctx context.Context, input ExecuteInput) ExecuteResult {
 		called <- input.StepID
@@ -123,8 +124,8 @@ func TestServiceSkipsDescendantsAfterFailure(t *testing.T) {
 		t.Fatalf("called step=%q", got)
 	}
 	for _, step := range final.Steps {
-		if step.ID == "child" && step.State != StateSkipped {
-			t.Fatalf("child state=%s", step.State)
+		if step.ID != "fail" && step.State != StateSkipped {
+			t.Fatalf("descendant %s state=%s", step.ID, step.State)
 		}
 	}
 }

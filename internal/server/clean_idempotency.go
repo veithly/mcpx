@@ -88,6 +88,18 @@ func decodeCleanToolResult(operation string, encoded []byte, replay bool) (*mcp.
 	}
 	if replay {
 		markCleanReplay(structured)
+		if stored.IsError {
+			if wire, ok := structured.(map[string]any); ok {
+				if failure, ok := wire["error"].(map[string]any); ok {
+					details, _ := failure["details"].(map[string]any)
+					if details == nil {
+						details = map[string]any{}
+						failure["details"] = details
+					}
+					details["retry_hint"] = "This is the recorded failed outcome for this idempotency_key, not a new execution. Inspect any partial effects; after correcting the cause, use a new idempotency_key for an intentional new execution."
+				}
+			}
+		}
 	}
 	result := mcpresult.NewStructured(structured, stored.Text)
 	result.IsError = stored.IsError

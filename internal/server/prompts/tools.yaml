@@ -1,15 +1,16 @@
 # Public tool descriptions. Input schemas are authoritative for arguments.
+# exec_command/write_stdin/apply_patch are the programming core; all others manage the gateway.
 tools:
   workspace: 零参数列出已注册 Workspace；用于创建 session 前发现工作空间。
   session: 创建、恢复或关闭 Remote Session；省略 action 默认 open/resume，remote_session_id 存在时恢复原会话，mode 可直接推导 close。
-  read: 读取、搜索、列举或组装 Workspace 源码上下文；view 在语义唯一时可省略，items[] 支持批量文件读取。环境事实使用 environment_read。
-  edit: 创建、更新或重命名 Workspace 文件；使用 revision guard 和幂等语义，不提供删除。删除/移出使用 move_out。
   move_out: 安全移出明确文件、目录或 symlink；prepare 冻结 manifest，用户确认后 submit 仅携带服务端 confirmation_uuid。
-  observe: 查看会话、执行 Task、Plan Task、历史或日志；目标唯一时可省略 view，任务日志支持流式 offset 续读。
+  observe: 查看会话、执行 Task、Plan Task、历史或日志；目标唯一时可省略 view，历史通过 cursor 分页，任务日志通过 stdout_offset/stderr_offset 续读。源码差异用 exec_command 运行 git diff。
   progress: 发布用户可见进度与终态；过程仅用于有业务意义的里程碑、等待、阻塞或失败，任务正常完成并准备最终回复前必须用 completed + result 汇报一次最终结果。
-  execute: 按策略执行命令或项目任务并处理 attach/stop/stdin；purpose 必须描述真实目标和副作用，长命令返回 execution_task_id。
+  exec_command: 通过 MCPX 原生进程 backend 执行 shell 命令，无需 Codex 可执行文件；读取和搜索源码直接运行 rg/cat/sed。返回合并 stdout/stderr 的 output、exit_code，或仍在运行的整数 session_id；非零退出是命令结果。MCPX 按配置执行权限检查，需确认时由 console 审批。
+  write_stdin: 向 exec_command 返回的整数 session_id 写入 chars，或省略 chars 等待新输出；结果使用同一 output/exit_code/session_id 契约。进程句柄与 remote_session_id 不同。
+  apply_patch: 通过 MCPX 原生补丁 backend 应用 Codex 格式的原始补丁文本，支持 Add/Update/Delete/Move；路径相对当前 Remote Session 的 Workspace 根目录。MCP 仅用 input 字符串包裹 freeform 补丁；权限和确认由 MCPX 配置及 console 控制。
   plan: 创建、读取、推进、阻塞、重规划或交付持久化计划。
-  operation_batch: 按 DAG 提交多个公开工具操作；无依赖步骤可并发。
+  operation_batch: 按 DAG 提交多个网关管理面操作；无依赖步骤可并发。exec_command/write_stdin/apply_patch 直接调用，不通过 Operation 包装。
   operation_manage: 查询、等待、读取结果、取消或恢复异步 Operation。
   runtime_read: 读取 MCPX 运行时能力、项目摘要或适用指令；project/instructions 可指定 workspace，无需先建 session；若同时提供 remote_session_id，必须与 workspace 一致。
   environment_read: 读取当前主机/工具链环境或与已保存快照比较。

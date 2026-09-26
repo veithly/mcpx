@@ -323,6 +323,17 @@ func publicResultStatus(result *mcp.CallToolResult) string {
 		return ""
 	}
 	if sc, ok := result.StructuredContent.(map[string]any); ok {
+		if _, rawOutput := sc["output"]; rawOutput {
+			if code, ok := numberValue(sc["exit_code"]); ok {
+				if code != 0 {
+					return "failed"
+				}
+				return "succeeded"
+			}
+			if sc["session_id"] != nil {
+				return "accepted"
+			}
+		}
 		if status, _ := sc["status"].(string); status != "" {
 			switch status {
 			case string(envelope.StatusOK), string(envelope.StatusAccepted), string(envelope.StatusNeedConfirmation), string(envelope.StatusInterrupted):
@@ -342,6 +353,9 @@ func firstToolText(result *mcp.CallToolResult) string {
 func toolObservationFacts(name string, args map[string]any, result *mcp.CallToolResult, timing interactionTiming) observation.Event {
 	facts := observation.Event{DurationMs: timing.ServerElapsedMs}
 	if command, ok := args["command"].(string); ok {
+		facts.Command = strings.TrimSpace(command)
+	}
+	if command, ok := args["cmd"].(string); ok {
 		facts.Command = strings.TrimSpace(command)
 	}
 	if task, ok := args["task"].(string); ok && facts.Command == "" {

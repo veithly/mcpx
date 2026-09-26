@@ -18,7 +18,7 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	if _, exists := tools["approval_manage"]; exists {
 		t.Fatal("approval_manage must not be exposed; semantic confirmation uses the original tool")
 	}
-	for _, name := range []string{"observe", "read", "runtime_read", "environment_read"} {
+	for _, name := range []string{"observe", "runtime_read", "environment_read"} {
 		annotation := tools[name].Annotations
 		if !annotation.ReadOnlyHint || annotation.DestructiveHint != nil && *annotation.DestructiveHint || !annotation.IdempotentHint {
 			t.Fatalf("%s annotation is unsafe or incomplete: %+v", name, annotation)
@@ -27,20 +27,6 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	sessionAnnotation := tools["session"].Annotations
 	if sessionAnnotation.DestructiveHint != nil && *sessionAnnotation.DestructiveHint {
 		t.Fatalf("session should not be marked destructive: %+v", sessionAnnotation)
-	}
-	for _, name := range []string{"execute"} {
-		annotation := tools[name].Annotations
-		if annotation.DestructiveHint != nil && *annotation.DestructiveHint {
-			t.Fatalf("%s should not be marked destructive: %+v", name, annotation)
-		}
-	}
-	var commandSchema map[string]any
-	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tools["execute"]), &commandSchema); err != nil {
-		t.Fatal(err)
-	}
-	commandProperties := commandSchema["properties"].(map[string]any)
-	if commandProperties["remote_session_id"] == nil || commandProperties["purpose"] == nil || commandProperties["user_confirmed"] == nil || commandProperties["scope"] != nil {
-		t.Fatalf("execute schema must expose clean-core semantic fields without single-value scope: %+v", commandProperties)
 	}
 	for _, name := range []string{"skill_tool", "mcp_tool"} {
 		var extensionSchema map[string]any
@@ -59,21 +45,16 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 	if _, exists := sessionSchema["properties"].(map[string]any)["include_skills"]; exists {
 		t.Fatal("session must not expose request-level include_skills; use server discovery.skills config")
 	}
-	var readSchema map[string]any
-	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tools["read"]), &readSchema); err != nil {
-		t.Fatal(err)
-	}
-	modeSchema, ok := readSchema["properties"].(map[string]any)["mode"].(map[string]any)
-	enumValues, _ := modeSchema["enum"].([]any)
-	fullMode := false
-	for _, value := range enumValues {
-		if value == "full" {
-			fullMode = true
-			break
+	validateSession := toolValidator(tools["session"])
+	for _, field := range []string{"run_id", "git_identity_path", "remote_name"} {
+		if err := validateSession(mcpresult.Request(map[string]any{"action": "open", "workspace": "demo", field: "removed"})); err == nil {
+			t.Fatalf("session accepted removed Git identity parameter %q", field)
 		}
 	}
-	if !ok || !fullMode {
-		t.Fatalf("read must expose mode=full for complete client previews: %+v", modeSchema)
+	for _, field := range []string{"workspace", "workspace_path", "remote_session_id"} {
+		if sessionSchema["properties"].(map[string]any)[field] == nil {
+			t.Fatalf("session lost Workspace binding field %q", field)
+		}
 	}
 
 	request := mcpresult.Request(map[string]any{"intent": "open the demo workspace", "workspace": "demo"})
@@ -110,7 +91,7 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	capabilityData := structuredBusinessData(capabilityResult)
-	editCapabilityFound := false
+	patchCapabilityFound := false
 	moveOutCapabilityFound := false
 	for _, item := range asMapSlice(capabilityData["tools"]) {
 		if item["name"] == "move_out" {
@@ -121,17 +102,16 @@ func TestReadOnlyToolAnnotationsAndSessionOpenDefaults(t *testing.T) {
 			}
 			continue
 		}
-		if item["name"] != "edit" {
+		if item["name"] != "apply_patch" {
 			continue
 		}
-		editCapabilityFound = true
-		safety, _ := item["safety"].(map[string]any)
-		if safety["approval"] == "host_user_approval_required" || safety["scope"] != "registered_workspace_root" {
-			t.Fatalf("runtime_read must publish edit safety metadata: %+v", item)
+		patchCapabilityFound = true
+		if item["domain"] != "programming" || item["requires_remote_session"] != true {
+			t.Fatalf("runtime_read must identify the programming capability: %+v", item)
 		}
 	}
-	if !editCapabilityFound {
-		t.Fatal("runtime_read did not publish the edit capability")
+	if !patchCapabilityFound {
+		t.Fatal("runtime_read did not publish the apply_patch capability")
 	}
 	if !moveOutCapabilityFound {
 		t.Fatal("runtime_read did not publish the move_out capability")

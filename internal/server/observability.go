@@ -20,6 +20,10 @@ import (
 )
 
 func (r *Runtime) addTool(s *mcp.Server, tool mcp.Tool, handler mcp.ToolHandler) {
+	if isProgrammingTool(tool.Name) {
+		r.addProgrammingTool(s, tool, handler)
+		return
+	}
 	tool = withEmbeddedActivitySchema(tool)
 	// OutputSchema describes structuredContent, not the larger ARC metadata
 	// envelope. Keep the current ARC contract for MCPX tools and omit an
@@ -263,7 +267,7 @@ func (r *Runtime) instrumentTool(name string, handler mcp.ToolHandler, validator
 		if embeddedActivityErr != nil {
 			result = mcpresult.NewError("INVALID_ACTIVITY: " + embeddedActivityErr.Error())
 			err = nil
-		} else if !isOperationChild(callCtx) && r.operations != nil && asyncEligibleTool(name) && executionMode(req) == "async" && !isEphemeralRuntimeArguments(arguments) && observationParseErr == nil {
+		} else if !isOperationChild(callCtx) && r.operations != nil && asyncEligibleTool(name) && executionMode(req) == "async" && observationParseErr == nil {
 			result, err = callToolSafely(name, func() (*mcp.CallToolResult, error) {
 				return r.submitAsyncTool(callCtx, name, req, observationRequest)
 			})

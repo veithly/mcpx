@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,7 +16,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/config"
-	"mcpx/internal/mcpresult"
 )
 
 type authRoundTripper struct {
@@ -128,9 +126,10 @@ func acceptanceNormalized(result map[string]any, arcEnvelope map[string]any, res
 	return normalized
 }
 
-// TestA01A02A03A07A10A13ViaMCPProtocol exercises the real Streamable HTTP path:
-// client → tools/list / call_tool → MCPX handlers (acceptance A01/A02/A03/A07/A10/A13 core).
-func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
+// TestManagementAcceptanceViaMCPProtocol covers the authenticated public catalog,
+// session bootstrap, plans, instructions and resume over real Streamable HTTP.
+// Programming effects are covered by codex_programming_test.go.
+func TestManagementAcceptanceViaMCPProtocol(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("MCPX_HOME", home)
 	workspace := filepath.Join(home, "project")
@@ -218,9 +217,9 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		}
 	}
 	expectedTools := []string{
-		"workspace", "session", "read", "edit", "move_out", "observe", "progress",
+		"workspace", "session", "exec_command", "write_stdin", "apply_patch", "move_out", "observe", "progress",
 		"operation_batch", "operation_manage",
-		"execute", "plan", "artifact", "skill_tool", "mcp_tool", "browser",
+		"plan", "artifact", "skill_tool", "mcp_tool", "browser",
 		"runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide",
 	}
 	if len(byName) != len(expectedTools) {
@@ -241,9 +240,9 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			t.Fatalf("decode %s: %v", name, err)
 		}
 		rawOutputSchema, hasOutputSchema := listedTool["outputSchema"]
-		if name == "mcp_tool" {
+		if name == "mcp_tool" || isProgrammingTool(name) {
 			if hasOutputSchema && rawOutputSchema != nil {
-				t.Fatalf("mcp_tool must omit outputSchema: %+v", rawOutputSchema)
+				t.Fatalf("%s must omit outputSchema: %+v", name, rawOutputSchema)
 			}
 		} else {
 			outputSchema, ok := rawOutputSchema.(map[string]any)
@@ -271,29 +270,12 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			}
 		}
 	}
-	editTool := byName["edit"]
-	schemaJSON, err := json.Marshal(editTool.InputSchema)
-	if err != nil {
-		t.Fatal(err)
-	}
-	schemaText := string(schemaJSON)
-	for _, needle := range []string{"remote_session_id", "rev", "content", "replacements", "edits"} {
-		if !strings.Contains(schemaText, needle) {
-			t.Fatalf("edit schema missing %q: %s", needle, schemaText)
-		}
-	}
-	if strings.Contains(schemaText, "base_sha256") {
-		t.Fatalf("edit schema must not expose legacy base_sha256: %s", schemaText)
-	}
-	if !strings.Contains(schemaText, "update") || !strings.Contains(schemaText, "create") || !strings.Contains(schemaText, "rename") || strings.Contains(schemaText, "user_confirmed") || strings.Contains(schemaText, "\"delete\"") {
-		t.Fatalf("edit operation enum incomplete: %s", schemaText)
-	}
 	moveSchema, _ := json.Marshal(byName["move_out"].InputSchema)
 	var moveSchemaMap map[string]any
 	if err := json.Unmarshal(moveSchema, &moveSchemaMap); err != nil {
 		t.Fatal(err)
 	}
-	for _, needle := range []string{"prepare", "submit", "targets", "rev", "expected_sha256", "symlink", "confirmation_uuid"} {
+	for _, needle := range []string{"prepare", "submit", "targets", "expected_sha256", "symlink", "confirmation_uuid"} {
 		if !strings.Contains(string(moveSchema), needle) {
 			t.Fatalf("move_out schema missing %q: %s", needle, moveSchema)
 		}
@@ -326,31 +308,6 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 			t.Fatalf("move_out must bind %q server-side: %s", forbidden, moveSchema)
 		}
 	}
-	commandSchema, _ := json.Marshal(byName["execute"].InputSchema)
-	for _, field := range []string{"remote_session_id", "purpose"} {
-		if !strings.Contains(string(commandSchema), `"`+field+`"`) {
-			t.Fatalf("execute schema missing %q: %s", field, commandSchema)
-		}
-	}
-	var commandSchemaMap map[string]any
-	if err := json.Unmarshal(commandSchema, &commandSchemaMap); err != nil {
-		t.Fatal(err)
-	}
-	if containsSchemaRequired(commandSchemaMap["required"].([]any), "remote_session_id") {
-		t.Fatalf("execute remote_session_id must be optional when transport is bound: %s", commandSchema)
-	}
-	if strings.Contains(string(commandSchema), `"scope"`) {
-		t.Fatalf("execute schema must not expose single-value scope: %s", commandSchema)
-	}
-	contextSchema, _ := json.Marshal(byName["read"].InputSchema)
-	for _, removed := range []string{"pattern", "max_files"} {
-		if strings.Contains(string(contextSchema), removed) {
-			t.Fatalf("read exposes removed compatibility field %q: %s", removed, contextSchema)
-		}
-	}
-	if !strings.Contains(string(contextSchema), `"mode"`) || !strings.Contains(string(contextSchema), `"items"`) || !strings.Contains(string(contextSchema), `"entries_cursor"`) || !strings.Contains(string(contextSchema), `"entries_limit"`) {
-		t.Fatalf("read schema must expose file and direct-entry pagination fields: %s", contextSchema)
-	}
 	for _, extensionName := range []string{"skill_tool", "mcp_tool"} {
 		extensionSchema, _ := json.Marshal(byName[extensionName].InputSchema)
 		text := string(extensionSchema)
@@ -378,157 +335,13 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		t.Fatalf("catalog count %d != tools/list %d", len(declared), len(listed.Tools))
 	}
 
-	needsPurpose := func(name string, args map[string]any) bool {
-		switch name {
-		case "edit", "execute", "plan", "operation_batch", "screenshot_capture", "secret_provide":
-			return true
-		case "skill_tool", "mcp_tool":
-			return fmt.Sprint(args["action"]) == "call"
-		case "move_out":
-			return fmt.Sprint(args["action"]) == "prepare"
-		case "artifact":
-			return fmt.Sprint(args["action"]) == "register"
-		default:
-			return false
-		}
-	}
-	rawCall := func(name string, args map[string]any) map[string]any {
+	call := func(name string, args map[string]any) map[string]any {
 		t.Helper()
-		if needsPurpose(name, args) {
-			if _, exists := args["purpose"]; !exists {
-				withPurpose := make(map[string]any, len(args)+1)
-				for key, value := range args {
-					withPurpose[key] = value
-				}
-				withPurpose["purpose"] = "acceptance operation"
-				args = withPurpose
-			}
-		}
 		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		_ = mcpresult.FirstText // keep helper package used if text path needs it
-		if len(res.Content) == 0 {
-			t.Fatalf("%s empty content", name)
-		}
-		text, ok := res.Content[0].(*mcp.TextContent)
-		if !ok {
-			// The public result is human-first. Keep this fallback for attached
-			// content and older clients that still return a machine payload.
-			if value := resultMachineValue(res); value != nil {
-				raw, _ := json.Marshal(value)
-				var asMap map[string]any
-				if json.Unmarshal(raw, &asMap) == nil {
-					// Normalize to envelope-like shape for callers that expect status.
-					if _, hasOK := asMap["ok"]; !hasOK {
-						return map[string]any{"ok": true, "status": "succeeded", "data": asMap, "_raw_structured": true, "_result": res}
-					}
-					return asMap
-				}
-			}
-			t.Fatalf("%s content type %T", name, res.Content[0])
-		}
-		var envelope map[string]any
-		if err := json.Unmarshal([]byte(text.Text), &envelope); err != nil {
-			// The first text content is the host-visible display; models read
-			// structuredContent / _meta instead of parsing prose.
-			if value := resultMachineValue(res); value != nil {
-				raw, _ := json.Marshal(value)
-				_ = json.Unmarshal(raw, &envelope)
-			}
-		}
-		if normalized, ok := normalizeAcceptanceResult(envelope, res, text.Text); ok {
-			return normalized
-		}
-		if envelope == nil {
-			t.Fatalf("%s decode: no structuredContent/meta and text is not JSON\n%s", name, text.Text)
-		}
-		envelope["_result"] = res
-		envelope["_text"] = text.Text
-		return envelope
-	}
-
-	copyArgs := func(input map[string]any) map[string]any {
-		output := make(map[string]any, len(input)+3)
-		for key, value := range input {
-			output[key] = value
-		}
-		return output
-	}
-	normalizeCall := func(name string, input map[string]any) (string, map[string]any) {
-		args := copyArgs(input)
-		if value, exists := args["session_id"]; exists {
-			if _, hasRemote := args["remote_session_id"]; !hasRemote {
-				args["remote_session_id"] = value
-			}
-			delete(args, "session_id")
-		}
-		if _, exists := args["purpose"]; !exists {
-			if value, exists := args["intent"]; exists {
-				args["purpose"] = value
-			}
-		}
-		delete(args, "intent")
-		switch name {
-		case "file_read":
-			name, args["view"] = "read", "file"
-		case "context_query":
-			action, _ := args["action"].(string)
-			view := map[string]string{"list": "list", "query": "context", "search": "search"}[action]
-			if view == "" {
-				view = "search"
-			}
-			name, args["view"] = "read", view
-			delete(args, "action")
-		case "command_execute":
-			name = "execute"
-			args["action"] = "run"
-		case "task_manage":
-			action, _ := args["action"].(string)
-			if action == "attach" || action == "stop" || action == "stdin" {
-				name = "execute"
-				args["action"] = action
-			} else {
-				name = "observe"
-				if action == "status" {
-					args["view"] = "task"
-				} else {
-					args["view"] = action
-				}
-				delete(args, "action")
-			}
-		case "plan_manage":
-			action, _ := args["action"].(string)
-			switch action {
-			case "create":
-				name = "plan"
-				args["action"] = "create"
-			case "get":
-				name = "plan"
-				args["action"] = "read"
-			case "start_task":
-				name = "plan"
-				args["action"] = "advance"
-			case "complete_task":
-				name = "plan"
-				args["action"] = "complete"
-			case "block_task":
-				name = "plan"
-				args["action"] = "block"
-			default:
-				name = "plan"
-				args["action"] = action
-			}
-		case "runtime_inspect":
-			name, args["view"] = "runtime_read", args["action"]
-			delete(args, "action")
-		}
-		return name, args
-	}
-	call := func(name string, input map[string]any) map[string]any {
-		publicName, args := normalizeCall(name, input)
-		return rawCall(publicName, args)
+		return decodeToolResult(t, res)
 	}
 
 	// --- A03: session_open single call ---
@@ -548,7 +361,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	}
 	guidance, _ := openData["agent_guidance"].(map[string]any)
 	routing, _ := guidance["tool_routing"].(map[string]any)
-	if guidance["version"] != agentGuidanceVersion || !containsAnyString(routing["modify_files"], "edit") || guidance["response_contract"] != nil || guidance["edit_payload"] != nil {
+	if guidance["version"] != agentGuidanceVersion || !containsAnyString(routing["modify_files"], "apply_patch") || guidance["response_contract"] != nil || guidance["edit_payload"] != nil {
 		t.Fatalf("session_open compact guidance missing or incomplete: %+v", guidance)
 	}
 	remoteSession, _ := openData["remote_session"].(map[string]any)
@@ -607,18 +420,7 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	statusOK := func(resp map[string]any) bool {
 		return resp["status"] == "ok" || resp["status"] == "succeeded" || resp["ok"] == true
 	}
-	executeRun := call("execute", map[string]any{
-		"action": "run", "remote_session_id": remoteID, "purpose": "acceptance execute run",
-		"command": testPrintCommand("acceptance-execute"),
-	})
-	if !statusOK(executeRun) {
-		t.Fatalf("execute run = %+v", executeRun)
-	}
-	executedData, _ := executeRun["data"].(map[string]any)
-	if executedData["completed_in_call"] != true || executedData["exit_code"] != float64(0) {
-		t.Fatalf("execute run did not reach handler: %+v", executedData)
-	}
-	planCreated := call("plan_manage", map[string]any{
+	planCreated := call("plan", map[string]any{
 		"action": "create", "remote_session_id": remoteID, "summary": "acceptance plan", "purpose": "acceptance plan create",
 		"tasks": []any{map[string]any{"local_id": "verify", "title": "Verify protocol"}},
 	})
@@ -635,18 +437,18 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	if !strings.HasPrefix(taskID, "pt_") {
 		t.Fatalf("plan_create must issue server task id: %+v", planData)
 	}
-	started := call("plan_manage", map[string]any{"action": "start_task", "remote_session_id": remoteID, "plan_id": planID, "plan_task_id": taskID, "purpose": "start task"})
+	started := call("plan", map[string]any{"action": "advance", "remote_session_id": remoteID, "plan_id": planID, "plan_task_id": taskID, "purpose": "start task"})
 	if !statusOK(started) || started["data"].(map[string]any)["plan_task_id"] != taskID {
 		t.Fatalf("plan start = %+v", started)
 	}
-	completed := call("plan_manage", map[string]any{
-		"action": "complete_task", "remote_session_id": remoteID, "plan_id": planID, "plan_task_id": taskID, "purpose": "complete task",
+	completed := call("plan", map[string]any{
+		"action": "complete", "remote_session_id": remoteID, "plan_id": planID, "plan_task_id": taskID, "purpose": "complete task",
 		"evidence": []any{map[string]any{"kind": "source", "reference_id": "demo.go"}},
 	})
 	if !statusOK(completed) || completed["data"].(map[string]any)["status"] != "completed" {
 		t.Fatalf("plan complete = %+v", completed)
 	}
-	delivered := call("plan_manage", map[string]any{"action": "deliver", "remote_session_id": remoteID, "plan_id": planID, "purpose": "deliver plan"})
+	delivered := call("plan", map[string]any{"action": "deliver", "remote_session_id": remoteID, "plan_id": planID, "purpose": "deliver plan"})
 	if !statusOK(delivered) {
 		t.Fatalf("plan deliver = %+v", delivered)
 	}
@@ -657,8 +459,8 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		}
 	}
 
-	// --- A02: runtime_inspect capabilities revisions; role-independent tool_schema_revision ---
-	caps := call("runtime_inspect", map[string]any{"action": "capabilities", "remote_session_id": remoteID})
+	// --- A02: runtime_read capabilities revisions; role-independent tool_schema_revision ---
+	caps := call("runtime_read", map[string]any{"view": "capabilities", "remote_session_id": remoteID})
 	capData, _ := caps["data"].(map[string]any)
 	capRevs, _ := capData["revisions"].(map[string]any)
 	if fmt.Sprint(capRevs["tool_schema_revision"]) != schemaRev1 {
@@ -683,8 +485,8 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 	}
 
 	// --- A04 nested AGENTS ---
-	listedInstr := call("runtime_inspect", map[string]any{
-		"action":            "instructions",
+	listedInstr := call("runtime_read", map[string]any{
+		"view":              "instructions",
 		"remote_session_id": remoteID,
 		"anchor_path":       "frontend/src/views/Home.vue",
 	})
@@ -703,226 +505,4 @@ func TestA01A02A03A07A10A13ViaMCPProtocol(t *testing.T) {
 		t.Fatalf("expected global/project/directory scopes, got %v", scopes)
 	}
 
-	// --- A07 file_read_batch ---
-	batch := call("file_read", map[string]any{
-		"remote_session_id": remoteID,
-		"items": []any{
-			map[string]any{"path": "a.go", "offset": 0, "limit": 20},
-			map[string]any{"path": "b.go", "offset": 0, "limit": 20},
-			map[string]any{"path": "missing.go", "offset": 0, "limit": 10},
-		},
-	})
-	batchData, _ := batch["data"].(map[string]any)
-	results, _ := batchData["results"].([]any)
-	if len(results) != 3 {
-		t.Fatalf("batch results: %+v", batchData)
-	}
-	okCount, failCount := 0, 0
-	var demoRev string
-	for _, raw := range results {
-		item, _ := raw.(map[string]any)
-		if item["ok"] == true {
-			okCount++
-			if item["path"] == "a.go" {
-				demoRev, _ = item["rev"].(string)
-			}
-		} else {
-			failCount++
-		}
-	}
-	if okCount != 2 || failCount != 1 {
-		t.Fatalf("batch ok/fail = %d/%d data=%+v", okCount, failCount, batchData)
-	}
-	// Consistency with single file_read
-	single := call("file_read", map[string]any{"remote_session_id": remoteID, "path": "a.go", "offset": 0, "limit": 20})
-	singleData, _ := single["data"].(map[string]any)
-	if singleData["rev"] != demoRev || demoRev == "" {
-		t.Fatalf("batch rev %q != single %q", demoRev, singleData["rev"])
-	}
-
-	// --- A08 code_search context ---
-	search := call("context_query", map[string]any{
-		"action":            "search",
-		"remote_session_id": remoteID,
-		"query":             "Alpha",
-		"context_before":    1,
-		"context_after":     1,
-	})
-	searchData, _ := search["data"].(map[string]any)
-	matches, _ := searchData["matches"].([]any)
-	if len(matches) == 0 {
-		t.Fatalf("search missed Alpha: %+v", searchData)
-	}
-	match0, _ := matches[0].(map[string]any)
-	if match0["rev"] == nil || match0["rev"] == "" || match0["sha256"] != nil {
-		t.Fatalf("search missing compact rev or leaking sha256: %+v", match0)
-	}
-	scopedQuery := call("read", map[string]any{
-		"view": "context", "remote_session_id": remoteID,
-		"query": "检查 Alpha 实现代码", "search_mode": "smart", "parallel": true, "max_results": 10,
-		"paths": []any{"."}, "include_glob": "**/*.go",
-	})
-	scopedData, _ := scopedQuery["data"].(map[string]any)
-	scopedFiles, _ := scopedData["files"].([]any)
-	if len(scopedFiles) == 0 {
-		t.Fatalf("recursive directory query returned no source files: %+v", scopedData)
-	}
-	foundAlpha := false
-	for _, raw := range scopedFiles {
-		item, _ := raw.(map[string]any)
-		if item["path"] == "a.go" {
-			foundAlpha = true
-		}
-	}
-	if !foundAlpha {
-		t.Fatalf("recursive directory query missed a.go: %+v", scopedData)
-	}
-
-	// --- A08 command_execute / task_manage short and long command paths ---
-	short := call("command_execute", map[string]any{
-		"remote_session_id": remoteID, "command": testPrintCommand("short-command"), "purpose": "run the short command protocol check",
-	})
-	shortData, _ := short["data"].(map[string]any)
-	if shortData["completed_in_call"] != true || shortData["exit_code"] != float64(0) || stringPayload(shortData, "execution_task_id") == "" {
-		t.Fatalf("short command should complete in one call: %+v", short)
-	}
-	long := call("command_execute", map[string]any{
-		"remote_session_id": remoteID, "command": testSleepCommand(50 * time.Millisecond), "purpose": "verify short wait task handoff", "yield_time_ms": 1,
-	})
-	longData, _ := long["data"].(map[string]any)
-	longTaskID, _ := longData["execution_task_id"].(string)
-	if longData["completed_in_call"] != false || longTaskID == "" {
-		t.Fatalf("long command should return a unified Task: %+v", long)
-	}
-	actions, _ := long["actions"].([]any)
-	if len(actions) != 1 {
-		t.Fatalf("running Task must expose one canonical continuation action: %+v", long["actions"])
-	}
-	next, _ := actions[0].(map[string]any)
-	nextArgs, _ := next["arguments"].(map[string]any)
-	if next["id"] == "" || nextArgs["execution_task_id"] != longTaskID || nextArgs["yield_time_ms"] != nil {
-		t.Fatalf("short run yield must not be inherited by continuation: %+v", next)
-	}
-	if nextArgs["stdout_offset"] != longData["stdout_next_offset"] || nextArgs["stderr_offset"] != longData["stderr_next_offset"] {
-		t.Fatalf("continuation offsets must match returned stream offsets: next=%+v data=%+v", nextArgs, longData)
-	}
-	attached := call(next["id"].(string), nextArgs)
-	attachedData, _ := attached["data"].(map[string]any)
-	if attachedData["status"] != "exited" || attachedData["exit_code"] != float64(0) || attachedData["stdout_next_offset"] == nil || attachedData["stderr_next_offset"] == nil {
-		t.Fatalf("task attach must return stream-specific offsets: %+v", attached)
-	}
-	overTen := call("command_execute", map[string]any{
-		"remote_session_id": remoteID, "command": testSleepCommand(11 * time.Second), "purpose": "verify default long-task handoff",
-	})
-	overTenData, _ := overTen["data"].(map[string]any)
-	overTenTaskID, _ := overTenData["execution_task_id"].(string)
-	if overTenData["completed_in_call"] != false || overTenTaskID == "" {
-		t.Fatalf("command longer than the default 10s yield should return a Task: %+v", overTen)
-	}
-	stopped := call("task_manage", map[string]any{
-		"action": "stop", "remote_session_id": remoteID, "execution_task_id": overTenTaskID,
-	})
-	if stopped["status"] != "ok" {
-		t.Fatalf("long command Task could not be stopped: %+v", stopped)
-	}
-
-	// --- A10/A13 clean edit + inline diff summary ---
-	sum := sha256.Sum256([]byte(files["demo.go"]))
-	base := compactFileRevision(fmt.Sprintf("sha256:%x", sum[:]))
-	executed := call("edit", map[string]any{
-		"remote_session_id": remoteID,
-		"idempotency_key":   "edit-idempotency-key",
-		"purpose":           "bump Value",
-		"edits": []any{map[string]any{
-			"operation": "update", "path": "demo.go", "rev": base,
-			"replacements": []any{map[string]any{"match": "const Value = 1", "replacement": "const Value = 2"}},
-		}},
-	})
-	execData, _ := executed["data"].(map[string]any)
-	if execData == nil {
-		t.Fatalf("edit: %+v", executed)
-	}
-	if !statusOK(executed) {
-		t.Fatalf("edit was not applied: %+v", executed)
-	}
-	if execData["total_changed_lines"] != float64(2) && execData["total_changed_lines"] != 2 {
-		t.Fatalf("unexpected changed line count: %+v", execData)
-	}
-	if execData["diff_summary"] != nil {
-		t.Fatalf("edit response must not duplicate per-file diff as diff_summary: %+v", execData)
-	}
-	editResults, _ := execData["results"].([]any)
-	if len(editResults) != 1 {
-		t.Fatalf("edit results missing: %+v", execData)
-	}
-	editResult, _ := editResults[0].(map[string]any)
-	if diff, _ := editResult["diff"].(string); !strings.Contains(diff, "-const Value = 1") || !strings.Contains(diff, "+const Value = 2") {
-		t.Fatalf("inline per-file diff missing concrete change: %+v", execData)
-	}
-	content, err := os.ReadFile(filepath.Join(workspace, "demo.go"))
-	if err != nil || !strings.Contains(string(content), "Value = 2") {
-		t.Fatalf("file not updated: %q err=%v", content, err)
-	}
-	replayed := call("edit", map[string]any{
-		"remote_session_id": remoteID, "idempotency_key": "edit-idempotency-key", "purpose": "bump Value",
-		"edits": []any{map[string]any{"operation": "update", "path": "demo.go", "rev": base,
-			"replacements": []any{map[string]any{"match": "const Value = 1", "replacement": "const Value = 2"}}}},
-	})
-	replayData, _ := replayed["data"].(map[string]any)
-	replayResults, _ := replayData["results"].([]any)
-	replayResult, _ := replayResults[0].(map[string]any)
-	if replayData["idempotent_replay"] != true || replayResult["diff"] != editResult["diff"] || replayData["diff_summary"] != nil {
-		t.Fatalf("edit retry must replay its original per-file diff without a duplicate summary: %+v", replayed)
-	}
-	// --- A12 stale revision ---
-	stale := call("edit", map[string]any{
-		"remote_session_id": remoteID, "purpose": "stale",
-		"edits": []any{map[string]any{
-			"operation": "update", "path": "demo.go", "rev": base, // old revision
-			"replacements": []any{map[string]any{"match": "const Value = 2", "replacement": "const Value = 3"}},
-		}},
-	})
-	if stale["status"] == "ok" {
-		t.Fatalf("stale revision should fail: %+v", stale)
-	}
-	errBody, _ := stale["error"].(map[string]any)
-	code, _ := errBody["code"].(string)
-	if code != "STALE_REVISION" || errBody["category"] != "conflict" || errBody["retryable"] != true {
-		t.Fatalf("expected retryable stale-revision contract, got %+v", stale)
-	}
-	// File must remain at Value = 2
-	content, _ = os.ReadFile(filepath.Join(workspace, "demo.go"))
-	if strings.Contains(string(content), "Value = 3") {
-		t.Fatal("stale write must not apply")
-	}
-
-	// --- A11 zero match fails ---
-	freshSum := sha256.Sum256(content)
-	freshBase := compactFileRevision(fmt.Sprintf("sha256:%x", freshSum[:]))
-	nomatch := call("edit", map[string]any{
-		"remote_session_id": remoteID, "purpose": "no match", "apply": false,
-		"edits": []any{map[string]any{
-			"operation": "update", "path": "demo.go", "rev": freshBase,
-			"replacements": []any{map[string]any{"match": "DOES_NOT_EXIST_XYZ", "replacement": "x"}},
-		}},
-	})
-	if nomatch["status"] == "ok" {
-		t.Fatalf("zero match should fail: %+v", nomatch)
-	}
-
-	removed := call("observe", map[string]any{"remote_session_id": remoteID, "view": "changes"})
-	if statusOK(removed) {
-		t.Fatalf("observe must reject removed view changes: %+v", removed)
-	}
-	if body, _ := removed["error"].(map[string]any); strings.ToUpper(fmt.Sprint(body["code"])) != "INVALID_ARGUMENTS" {
-		t.Fatalf("observe removed view changes must return INVALID_ARGUMENTS: %+v", removed)
-	}
-	missingDiffID := call("observe", map[string]any{"remote_session_id": remoteID, "view": "diff"})
-	if statusOK(missingDiffID) {
-		t.Fatalf("observe diff without edit_id must fail validation: %+v", missingDiffID)
-	}
-	if body, _ := missingDiffID["error"].(map[string]any); strings.ToUpper(fmt.Sprint(body["code"])) != "EDIT_ID_REQUIRED" {
-		t.Fatalf("observe diff without edit_id must return EDIT_ID_REQUIRED: %+v", missingDiffID)
-
-	}
 }

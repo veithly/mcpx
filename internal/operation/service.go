@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -372,8 +373,8 @@ func (s *Service) Result(ctx context.Context, operationID, stepID, cursor string
 			return ResultPage{}, fmt.Errorf("step %q: %w", stepID, ErrNotFound)
 		}
 	}
-	if len(raw) <= limit {
-		return ResultPage{Operation: record, StepID: stepID, Result: raw}, nil
+	if cursor == "" && len(raw) <= limit {
+		return ResultPage{Operation: record, StepID: stepID, Result: raw, Limit: limit}, nil
 	}
 	offset, err := parseCursor(cursor)
 	if err != nil {
@@ -382,9 +383,20 @@ func (s *Service) Result(ctx context.Context, operationID, stepID, cursor string
 	if offset > len(raw) {
 		offset = len(raw)
 	}
+	if offset < len(raw) && !utf8.RuneStart(raw[offset]) {
+		return ResultPage{}, fmt.Errorf("cursor must be on a UTF-8 boundary")
+	}
 	end := offset + limit
 	if end > len(raw) {
 		end = len(raw)
+	}
+	for end > offset && end < len(raw) && !utf8.RuneStart(raw[end]) {
+		end--
+	}
+	if end == offset && offset < len(raw) {
+		// At least one complete rune is needed to make forward progress.
+		_, size := utf8.DecodeRune(raw[offset:])
+		end = offset + size
 	}
 	page, _ := json.Marshal(map[string]any{
 		"chunk": string(raw[offset:end]), "offset": offset, "next_offset": end, "truncated": end < len(raw),
@@ -393,7 +405,7 @@ func (s *Service) Result(ctx context.Context, operationID, stepID, cursor string
 	if end < len(raw) {
 		next = strconv.Itoa(end)
 	}
-	return ResultPage{Operation: record, StepID: stepID, Result: page, NextCursor: next}, nil
+	return ResultPage{Operation: record, StepID: stepID, Result: page, NextCursor: next, Limit: limit}, nil
 }
 
 // Cancel prevents new steps and cancels all currently running steps.
@@ -835,18 +847,32 @@ func (s *Service) reconcile(operationID string) {
 	for _, step := range record.Steps {
 		byID[step.ID] = step
 	}
-	for _, step := range record.Steps {
-		if step.State != StateQueued {
-			continue
-		}
-		for _, dependency := range step.DependsOn {
-			dependencyState := byID[dependency].State
-			if dependencyState == StateFailed || dependencyState == StateCancelled || dependencyState == StateInterrupted || dependencyState == StateSkipped {
-				_, _ = s.db.Exec(`UPDATE operation_steps SET state = 'skipped', completed_at = ? WHERE operation_id = ? AND step_id = ? AND state = 'queued'`, s.now().UTC().UnixMilli(), operationID, step.ID)
-				break
+	// Reach a fixed point: callers may submit dependencies in any order, and
+	// a skipped child must propagate to every descendant before aggregation.
+	for {
+		changed := false
+		for _, step := range record.Steps {
+			if byID[step.ID].State != StateQueued {
+				continue
+			}
+			for _, dependency := range step.DependsOn {
+				dependencyState := byID[dependency].State
+				if dependencyState == StateFailed || dependencyState == StateCancelled || dependencyState == StateInterrupted || dependencyState == StateSkipped {
+					if _, err := s.db.Exec("UPDATE operation_steps SET state = 'skipped', completed_at = ? WHERE operation_id = ? AND step_id = ? AND state = 'queued'", s.now().UTC().UnixMilli(), operationID, step.ID); err != nil {
+						return
+					}
+					step.State = StateSkipped
+					byID[step.ID] = step
+					changed = true
+					break
+				}
 			}
 		}
+		if !changed {
+			break
+		}
 	}
+
 	record, err = s.Get(context.Background(), operationID)
 	if err != nil {
 		return

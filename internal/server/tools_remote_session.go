@@ -310,6 +310,8 @@ func (r *Runtime) toolRemoteSessionList(ctx context.Context, req *mcp.CallToolRe
 }
 
 func (r *Runtime) toolRemoteSessionClose(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	r.processLifecycle.Lock()
+	defer r.processLifecycle.Unlock()
 	envReq, principal, fail := r.remoteRequest(ctx, req)
 	if fail != nil {
 		return fail, nil
@@ -318,17 +320,25 @@ func (r *Runtime) toolRemoteSessionClose(ctx context.Context, req *mcp.CallToolR
 	if err != nil {
 		return r.remoteError(envReq, "", "", err)
 	}
-	if tasks, taskErr := r.tasks.List(remoteSessionID, 100); taskErr == nil {
-		for _, task := range tasks {
-			if fmt.Sprint(task["status"]) == "running" {
-				return r.remoteError(envReq, remoteSessionID, "", fmt.Errorf("%w: task %v must be stopped before closing", errRemoteSessionRunning, task["execution_task_id"]))
-			}
-		}
+	if tasks := r.tasks.Running(remoteSessionID); len(tasks) > 0 {
+		return r.remoteError(envReq, remoteSessionID, "", fmt.Errorf("%w: task %v must be stopped before closing", errRemoteSessionRunning, tasks[0]["execution_task_id"]))
+	}
+	r.processMu.Lock()
+	processClient := r.processClients[remoteSessionID]
+	r.processMu.Unlock()
+	if processClient != nil && processClient.HasRunning() {
+		return r.remoteError(envReq, remoteSessionID, "", fmt.Errorf("%w: stop or finish process sessions before closing", errRemoteSessionRunning))
 	}
 	mode, _ := envReq.Payload["mode"].(string)
 	session, err := r.remote.Close(ctx, principal, remoteSessionID, mode)
 	if err != nil {
 		return r.remoteError(envReq, remoteSessionID, "", err)
+	}
+	if processClient != nil {
+		_ = processClient.Close()
+		r.processMu.Lock()
+		delete(r.processClients, remoteSessionID)
+		r.processMu.Unlock()
 	}
 	r.discoveryMu.Lock()
 	for id, observed := range r.discoveries {

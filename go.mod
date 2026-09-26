@@ -3,6 +3,7 @@ module mcpx
 go 1.26.1
 
 require (
+	github.com/creack/pty v1.1.24
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0

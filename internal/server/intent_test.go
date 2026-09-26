@@ -49,7 +49,7 @@ func TestPublicToolSchemasExcludeObservationBookkeeping(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{"workspace", "read", "observe", "runtime_read", "environment_read"} {
+	for _, name := range []string{"workspace", "observe", "runtime_read", "environment_read"} {
 		schema := decodedToolSchema(t, runtime.listedToolMap()[name])
 		properties, _ := schema["properties"].(map[string]any)
 		if properties["purpose"] != nil {
@@ -57,11 +57,6 @@ func TestPublicToolSchemasExcludeObservationBookkeeping(t *testing.T) {
 		}
 	}
 
-	read := decodedToolSchema(t, runtime.listedToolMap()["read"])
-	readProperties, _ := read["properties"].(map[string]any)
-	if readProperties["execution_mode"] != nil {
-		t.Fatalf("read must not expose generic execution_mode: %+v", readProperties)
-	}
 }
 
 func TestEffectfulToolsOwnPurposeContract(t *testing.T) {
@@ -70,7 +65,7 @@ func TestEffectfulToolsOwnPurposeContract(t *testing.T) {
 	runtime.registerTools(protocol)
 	registered := runtime.listedToolMap()
 
-	for _, name := range []string{"edit", "operation_batch", "screenshot_capture", "secret_provide"} {
+	for _, name := range []string{"operation_batch", "screenshot_capture", "secret_provide"} {
 		schema := decodedToolSchema(t, registered[name])
 		properties, _ := schema["properties"].(map[string]any)
 		if properties["purpose"] == nil || !schemaRequires(schema, "purpose") {
@@ -87,13 +82,6 @@ func TestEffectfulToolsOwnPurposeContract(t *testing.T) {
 		}
 	}
 
-	execute := decodedToolSchema(t, registered["execute"])
-	execProps, _ := execute["properties"].(map[string]any)
-	execAction, _ := execProps["action"].(map[string]any)
-	execDesc, _ := execAction["description"].(string)
-	if !strings.Contains(execDesc, "run") || !strings.Contains(execDesc, "purpose") {
-		t.Fatalf("execute action.description must document purpose for run: %s", execDesc)
-	}
 	moveOut := decodedToolSchema(t, registered["move_out"])
 	moveProps, _ := moveOut["properties"].(map[string]any)
 	moveAction, _ := moveProps["action"].(map[string]any)
@@ -110,8 +98,6 @@ func TestPurposeDescriptionsAreLocalToEffect(t *testing.T) {
 	registered := runtime.listedToolMap()
 
 	checks := map[string]string{
-		"execute":            "用户目标",
-		"edit":               "文件变更",
 		"screenshot_capture": "屏幕",
 		"secret_provide":     "Secret",
 	}

@@ -11,14 +11,12 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/audit"
-	workspacefile "mcpx/internal/file"
 	"mcpx/internal/instruction"
 	"mcpx/internal/observation"
 	"mcpx/internal/projecttask"
 	"mcpx/internal/remotesession"
 	"mcpx/internal/skill"
 	buildversion "mcpx/internal/version"
-	workspaceidentity "mcpx/internal/workspace"
 )
 
 // toolSessionOpen creates or reuses a Remote Session. New sessions return the full
@@ -69,32 +67,6 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 	}
 
 	wsPath := session.WorkspacePath
-	var gitIdentity *workspaceidentity.GitIdentity
-	if runID := stringPayload(envReq.Payload, "run_id"); runID != "" || stringPayload(envReq.Payload, "git_identity_path") != "" {
-		if err := r.reconcileWorkspaceTransition(ctx, session.ID, runID); err != nil {
-			return r.terminalError(envReq, session.ID, session.WorkspaceName, "WORKSPACE_TRANSITION_UNVERIFIED", err.Error())
-		}
-		identityPath := stringPayload(envReq.Payload, "git_identity_path")
-		if identityPath == "" {
-			identityPath = "."
-		}
-		resolved, err := workspacefile.Resolve(wsPath, identityPath)
-		if err != nil {
-			return r.terminalError(envReq, session.ID, session.WorkspaceName, "WORKSPACE_IDENTITY_UNAVAILABLE", "identity target must be inside registered workspace")
-		}
-		remoteName := stringPayload(envReq.Payload, "remote_name")
-		if remoteName == "" {
-			remoteName = "origin"
-		}
-		identity, err := workspaceidentity.CaptureGitIdentity(ctx, resolved, remoteName, runID)
-		if err != nil {
-			return r.terminalError(envReq, session.ID, session.WorkspaceName, "WORKSPACE_IDENTITY_UNAVAILABLE", err.Error())
-		}
-		if err := workspaceidentity.FreezeGitIdentity(ctx, r.state.DB(), session.ID, identity); err != nil {
-			return r.terminalError(envReq, session.ID, session.WorkspaceName, "WORKSPACE_IDENTITY_MISMATCH", err.Error())
-		}
-		gitIdentity = &identity
-	}
 	effective := r.effectiveConfig(wsPath)
 	var tools []map[string]any
 	if !resuming {
@@ -170,23 +142,15 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 	go func() {
 		defer bootstrap.Done()
 		pendingConfirmations = pendingConfirmationItems(r.approvals.ListRemoteSession(session.ID))
-		taskLimit := 20
 		if resuming {
-			taskLimit = 100
-		}
-		recentTasks, err := r.tasks.List(session.ID, taskLimit)
-		if err != nil {
-			markDegraded("terminal_tasks", err)
-		} else if resuming {
-			activeTasks := make([]map[string]any, 0, len(recentTasks))
-			for _, task := range recentTasks {
-				if fmt.Sprint(task["status"]) == "running" {
-					activeTasks = append(activeTasks, task)
-				}
-			}
-			taskList = activeTasks
+			taskList = r.tasks.Running(session.ID)
 		} else {
-			taskList = recentTasks
+			recentTasks, err := r.tasks.List(session.ID, 20)
+			if err != nil {
+				markDegraded("terminal_tasks", err)
+			} else {
+				taskList = recentTasks
+			}
 		}
 		if !resuming {
 			if list, err := r.artifacts.List(ctx, session.ID, "", 20); err != nil {
@@ -262,6 +226,12 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 	if resuming {
 		data["tasks_scope"] = "running"
 	}
+	r.processMu.Lock()
+	processClient := r.processClients[session.ID]
+	r.processMu.Unlock()
+	if processClient != nil {
+		data["process_sessions"] = processClient.ActiveSessions()
+	}
 	if !resuming {
 		data["artifacts"] = artifacts
 		data["mcpx"] = map[string]any{
@@ -301,9 +271,6 @@ func (r *Runtime) toolSessionOpen(ctx context.Context, req *mcp.CallToolRequest)
 	if len(degradedSources) > 0 {
 		sort.Strings(degradedSources)
 		data["degraded"] = degradedSources
-	}
-	if gitIdentity != nil {
-		data["git_identity"] = gitIdentity
 	}
 
 	r.bindRemoteSession(ctx, principal, session.ID)

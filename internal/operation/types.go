@@ -86,6 +86,7 @@ type StepRecord struct {
 
 // ResultPage contains an operation record and an optionally paged result.
 type ResultPage struct {
+	Limit      int
 	Operation  Record
 	StepID     string
 	Result     json.RawMessage

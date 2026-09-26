@@ -13,11 +13,8 @@ import (
 
 	"mcpx/internal/auth"
 	"mcpx/internal/config"
-	"mcpx/internal/edit"
-	"mcpx/internal/file"
 	"mcpx/internal/operation"
 	"mcpx/internal/remotesession"
-	"mcpx/internal/source"
 )
 
 func TestCapabilityCatalogMatchesRegisteredTools(t *testing.T) {
@@ -46,6 +43,25 @@ func TestCapabilityCatalogMatchesRegisteredTools(t *testing.T) {
 	}
 }
 
+func TestCapabilityGroupsSeparateProgrammingFromManagement(t *testing.T) {
+	groups := capabilityGroups()
+	if len(groups) != 2 || len(groups["programming"]) != 3 || len(groups["management"]) != 17 {
+		t.Fatalf("unexpected groups: %+v", groups)
+	}
+	seen := map[string]bool{}
+	for group, names := range groups {
+		for _, name := range names {
+			if seen[name] || !isCleanPublicTool(name) || isProgrammingTool(name) != (group == "programming") {
+				t.Fatalf("invalid group member %s.%s", group, name)
+			}
+			seen[name] = true
+		}
+	}
+	if len(seen) != len(capabilityToolNames()) {
+		t.Fatal("capability groups omit tools")
+	}
+}
+
 func TestMachineToolCapabilitiesApplyRoleAndFeatureState(t *testing.T) {
 	effective := config.DefaultConfig()
 	effective.Terminal.Enabled = false
@@ -55,22 +71,15 @@ func TestMachineToolCapabilitiesApplyRoleAndFeatureState(t *testing.T) {
 	for _, item := range items {
 		states[item["name"].(string)] = item["state"].(string)
 	}
-	if states["read"] != "available" || states["edit"] != "forbidden" || states["execute"] != "disabled" {
+	if states["observe"] != "available" || states["apply_patch"] != "forbidden" || states["exec_command"] != "disabled" || states["write_stdin"] != "disabled" {
 		t.Fatalf("unexpected capability states: %+v", states)
 	}
 }
 
 func TestMachineCapabilitiesPublishHardLimits(t *testing.T) {
 	limits := publishedLimits()
-	read := limits["read"].(map[string]any)
-	if read["max_source_bytes"] != file.MaxSourceBytes || read["max_items"] != MaxReadItems || read["max_direct_entries"] != source.MaxDirectListEntries {
-		t.Fatalf("read limits=%+v", read)
-	}
 	if limits["operation_batch"].(map[string]any)["max_steps"] != operation.MaxSteps {
 		t.Fatalf("operation limits=%+v", limits["operation_batch"])
-	}
-	if limits["edit"].(map[string]any)["max_changed_lines"] != edit.MaxChangedLines {
-		t.Fatalf("edit limits=%+v", limits["edit"])
 	}
 	moveOut := limits["move_out"].(map[string]any)
 	if moveOut["max_targets"] != MaxMoveOutTargets || moveOut["max_response_preview_targets"] != MaxMoveOutResponsePreviewTargets || moveOut["max_manifest_entries"] != nil {
@@ -78,8 +87,8 @@ func TestMachineCapabilitiesPublishHardLimits(t *testing.T) {
 	}
 	items := machineToolCapabilities(config.DefaultConfig(), nil)
 	for _, item := range items {
-		if item["name"] == "read" && item["limits"] == nil {
-			t.Fatalf("read tool limits missing: %+v", item)
+		if item["name"] == "operation_batch" && item["limits"] == nil {
+			t.Fatalf("operation_batch limits missing: %+v", item)
 		}
 	}
 }
@@ -164,15 +173,15 @@ func TestCapabilityListIncludesInstructionsSkillsAndRoleState(t *testing.T) {
 		}
 	}
 	tools := data["tools"].([]any)
-	foundEdit := false
+	foundPatch := false
 	for _, raw := range tools {
 		item := raw.(map[string]any)
-		if item["name"] == "edit" {
-			foundEdit = item["state"] == "available"
+		if item["name"] == "apply_patch" {
+			foundPatch = item["state"] == "available"
 		}
 	}
-	if !foundEdit {
-		t.Fatal("owner capability did not expose edit as available")
+	if !foundPatch {
+		t.Fatal("owner capability did not expose apply_patch as available")
 	}
 
 	readRequest := mcpresult.Request(map[string]any{"intent": "read project instructions", "remote_session_id": remoteID, "id": "project"})
@@ -216,6 +225,10 @@ func TestRuntimeCapabilitiesPublishBuildProvenanceAndNoLegacyRevisionAliases(t *
 	metadata, ok := data["runtime"].(map[string]any)
 	if !ok {
 		t.Fatalf("runtime provenance missing: %+v", data)
+	}
+	implementation, ok := metadata["programming_implementation"].(map[string]any)
+	if !ok || implementation["external_codex_required"] != false || implementation["executor"] != "mcpx/native-unifiedexec" {
+		t.Fatalf("native toolchain provenance missing: %+v", metadata)
 	}
 	revisions := data["revisions"].(map[string]any)
 	if revisions["client_protocol_revision"] == "" || metadata["client_protocol_revision"] != revisions["client_protocol_revision"] {

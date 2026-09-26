@@ -71,6 +71,21 @@ func (c *consoleHandler) sendRequest(w http.ResponseWriter, r *http.Request) {
 // closed before accessing the managers, which may use the same SQLite pool.
 func (c *consoleHandler) stopSession(ctx context.Context, workspace, session, taskID string) ([]string, []string, []string) {
 	stopped, cancelled, failures := []string{}, []string{}, []string{}
+	if taskID == "" {
+		// MCPX owns the process tree. Closing its manager terminates
+		// this remote session's processes without involving historical Task IDs.
+		c.runtime.processMu.Lock()
+		client := c.runtime.processClients[session]
+		delete(c.runtime.processClients, session)
+		c.runtime.processMu.Unlock()
+		if client != nil {
+			if err := client.Close(); err != nil {
+				failures = append(failures, "cannot stop process sessions")
+			} else {
+				stopped = append(stopped, "processes")
+			}
+		}
+	}
 	if taskID == "" && c.runtime.operations != nil {
 		rows, err := c.runtime.state.DB().QueryContext(ctx, `SELECT id FROM operations WHERE workspace_name=? AND remote_session_id=? AND state IN ('queued','running','waiting_confirmation')`, workspace, session)
 		ids := []string{}

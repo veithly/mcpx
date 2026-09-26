@@ -2,43 +2,11 @@ package server
 
 import (
 	"encoding/json"
-	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"mcpx/internal/edit"
-	"mcpx/internal/file"
 	"mcpx/internal/server/prompts"
-	"mcpx/internal/source"
 )
-
-// cleanEditSafetyMeta is deliberately additive metadata for MCP Hosts. It does
-// not claim that a delete is harmless and cannot bypass host approval; it
-// explains the bounded, auditable contract that the host can show alongside
-// the standard destructiveHint.
-var cleanEditSafetyMeta = mcp.Meta{
-	"mcpx/safety": map[string]any{
-		"classification":    "constrained_workspace_file_mutation",
-		"approval":          "web_model_user_confirmation_required_for_move_out",
-		"scope":             "registered_workspace_root",
-		"target":            "regular_files_only_for_create_update_rename",
-		"revision_guard":    "compact_rev",
-		"symlink_policy":    "reject",
-		"idempotency":       "supported",
-		"audit":             "durable",
-		"execution":         "filesystem_only",
-		"shell_bypass":      "forbidden",
-		"approval_evidence": []string{"purpose", "explicit_paths", "rev", "server_snapshot"},
-		"server_rejections": []string{"path_escape", "symlink", "non_regular_file", "stale_revision", "file_policy_denied", "move_out_required"},
-	},
-}
-
-// edit only supports create/update/rename inside the registered workspace.
-// Removal is a separate confirmed workflow, so edit itself is non-destructive.
-var cleanEditToolAnnotation = toolAnnotation{
-	ReadOnly: false, Destructive: false, Idempotent: true, OpenWorld: false,
-	Title: "Workspace 文件变更（不提供删除）", Meta: cleanEditSafetyMeta,
-}
 
 var planToolAnnotation = toolAnnotation{
 	ReadOnly: false, Destructive: false, Idempotent: true, OpenWorld: false,
@@ -151,121 +119,39 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"client_request_id":            stringSchema("客户端幂等键；不能在不同项目间复用"),
 		"include_instructions_content": booleanSchema("是否内联返回指令内容"),
 		"include_project_tasks":        booleanSchema("是否返回项目任务"),
-		"run_id":                       stringSchema("显式请求 Git 身份快照的稳定运行 ID"),
-		"git_identity_path":            stringSchema("Git root 相对 Workspace 的路径；run_id 存在时默认根目录"),
-		"remote_name":                  stringSchema("身份快照的远端名称，默认 origin"),
 		"mode":                         enumSchema("关闭模式；出现时省略 action 也会推导 close", "closed", "archived"),
 	}, nil, sessionToolAnnotation), r.toolSession)
 
-	readItems := arraySchema(map[string]any{
-		"type":                 "object",
-		"additionalProperties": false,
-		"properties": map[string]any{
-			"path":             path,
-			"mode":             enumSchema("文件读取模式", "window", "full"),
-			"offset":           numberSchema("0-based 行偏移"),
-			"line_byte_offset": numberSchema("window 续读时 Offset 行内的模型侧 UTF-8 字节偏移；应原样复用 next_action"),
-			"limit":            numberSchema("最大行数"),
-		},
-		"required": []string{"path"},
-	}, "批量文件读取项")
-	readItems["maxItems"] = MaxReadItems
-	readItems["description"] = fmt.Sprintf("批量文件读取项；最多 %d 项；window 可读取超过单次 full 上限的源文件", MaxReadItems)
-	readPath := stringSchema("文件路径；view=list 时是硬作用域目录/文件，不会返回作用域外结果；同时返回该 scope 第一层的目录、文件和 symlink 条目")
-	maxBytesPerFile := numberSchema(fmt.Sprintf("单文件返回字节预算；完整源文件上限为 %d bytes，超大文件请用 window", file.MaxSourceBytes))
-	maxBytesPerFile["maximum"] = file.MaxSourceBytes
-	directEntriesLimit := numberSchema(fmt.Sprintf("view=list 第一层 entries 返回数量；默认 %d，最大 %d", source.DefaultDirectListEntries, source.MaxDirectListEntries))
-	directEntriesLimit["maximum"] = source.MaxDirectListEntries
-	r.addTool(s, cleanCoreTool("read", desc["read"], map[string]any{
-		"remote_session_id":    remoteSession,
-		"view":                 enumSchema("读取视图", "file", "search", "list", "context"),
-		"path":                 readPath,
-		"mode":                 enumSchema("文件读取模式", "window", "full"),
-		"offset":               numberSchema("0-based 行偏移"),
-		"line_byte_offset":     numberSchema("window 续读时 Offset 行内的模型侧 UTF-8 字节偏移；应原样复用 next_action"),
-		"limit":                numberSchema("行数或结果数量限制"),
-		"items":                readItems,
-		"max_total_bytes":      numberSchema("批量读取总字节预算"),
-		"query":                stringSchema("搜索或上下文查询"),
-		"search_mode":          enumSchema("上下文搜索模式", "smart", "exact", "token"),
-		"parallel":             booleanSchema("是否并行召回"),
-		"paths":                arraySchema(map[string]any{"type": "string"}, "搜索范围"),
-		"include_glob":         stringSchema("包含 glob"),
-		"exclude_glob":         stringSchema("排除 glob"),
-		"cursor":               stringSchema("分页游标"),
-		"entries_cursor":       stringSchema("view=list 的第一层 entries 分页游标；与递归 files 的 cursor 独立"),
-		"entries_limit":        directEntriesLimit,
-		"max_results":          numberSchema("最多匹配文件数"),
-		"max_bytes_per_file":   maxBytesPerFile,
-		"regex":                booleanSchema("是否按 RE2 正则解释"),
-		"case_sensitive":       booleanSchema("是否区分大小写"),
-		"include_instructions": booleanSchema("是否返回适用指令"),
-		"context_before":       numberSchema("匹配前上下文行数"),
-		"context_after":        numberSchema("匹配后上下文行数"),
-	}, []string{"remote_session_id"}, readOnlyToolAnnotation), r.toolRead)
-
-	editItem := map[string]any{
-		"type":                 "object",
-		"additionalProperties": false,
-		"properties": map[string]any{
-			"path":           path,
-			"operation":      enumSchema("文件操作；用户提出删除、移除或清理时请使用 move_out(action=prepare)，确认后再 move_out(action=submit)", "create", "update", "rename"),
-			"rev":            stringSchema("update/rename 必须；read 返回的 80-bit base64url file revision"),
-			"content":        stringSchema("新文件的完整内容"),
-			"content_base64": stringSchema("完整目标字节的标准 Base64；仅 create/update，须 newline_policy=exact，与 content/replacements/range 互斥"),
-			"newline_policy": enumSchema("preserve 使用现有逻辑文本编辑；exact 原样写入 content_base64 字节，不转换编码/BOM/换行", "preserve", "exact"),
-			"expected_format": map[string]any{
-				"type": "object", "additionalProperties": false,
-				"description": "约束最终写入字节；不执行格式转换，不匹配则写入前拒绝",
-				"properties": map[string]any{
-					"charset":     enumSchema("预期编码", "utf-8", "utf-16le", "utf-16be"),
-					"bom":         enumSchema("预期 BOM", "none", "utf-8", "utf-16le", "utf-16be"),
-					"line_ending": enumSchema("预期换行", "none", "LF", "CRLF", "CR", "mixed"),
-				}, "required": []string{"charset", "bom", "line_ending"},
-			},
-			"new_path": stringSchema("rename 的目标路径"),
-			"replacements": arraySchema(map[string]any{
-				"type":                 "object",
-				"additionalProperties": false,
-				"properties": map[string]any{
-					"match":       stringSchema("必须精确唯一匹配的片段"),
-					"replacement": stringSchema("替换后的片段"),
-				},
-				"required": []string{"match", "replacement"},
-			}, "从后往前应用的精确替换列表"),
-			"range": map[string]any{
-				"type":                 "object",
-				"additionalProperties": false,
-				"description":          "按逻辑行替换 update 范围；start_line/end_line 为 1-based 且包含首尾行，空 replacement 删除这些完整行。必须提供 rev；与 content/replacements 互斥。",
-				"properties": map[string]any{
-					"start_line":  map[string]any{"type": "integer", "minimum": 1, "description": "起始逻辑行（1-based，包含）"},
-					"end_line":    map[string]any{"type": "integer", "minimum": 1, "description": "结束逻辑行（1-based，包含）"},
-					"replacement": stringSchema("替换整个行范围的文本；空字符串删除范围内完整行"),
-				},
-				"required": []string{"start_line", "end_line", "replacement"},
-			},
-		},
-		"required": []string{"path", "operation"},
-		"allOf": []map[string]any{{
-			"if":   map[string]any{"properties": map[string]any{"operation": map[string]any{"enum": []string{"update", "rename"}}}},
-			"then": map[string]any{"required": []string{"rev"}},
-		}},
-	}
-	r.addTool(s, cleanCoreTool("edit", desc["edit"], map[string]any{
+	r.addTool(s, cleanCoreTool("exec_command", desc["exec_command"], map[string]any{
+		"cmd":               stringSchema("Shell command to execute."),
+		"workdir":           stringSchema("Working directory for the command. Defaults to the Remote Session workspace root; the resolved physical directory must remain inside that workspace."),
+		"shell":             stringSchema("Shell binary to launch. Defaults to the user's default shell."),
+		"login":             booleanSchema("True runs the shell with -l/-i semantics; false disables them. Defaults to true."),
+		"tty":               booleanSchema("True allocates a PTY for the command; false or omitted uses plain pipes."),
+		"yield_time_ms":     numberSchema("Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."),
+		"max_output_tokens": numberSchema("Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy."),
 		"remote_session_id": remoteSession,
-		"purpose":           stringSchema("本次文件变更的用户可见目的"),
-		"edits":             arraySchema(editItem, fmt.Sprintf("跨文件批量编辑；总 changed lines 上限为 %d", edit.MaxChangedLines)),
-		"idempotency_key":   stringSchema("同一批次重试时复用的业务幂等键"),
-		"apply":             booleanSchema("是否立即应用；默认 true"),
-	}, []string{"remote_session_id", "purpose", "edits"}, cleanEditToolAnnotation), r.toolEdit)
+	}, []string{"cmd"}, mutatingToolAnnotation), r.toolExecCommand)
+
+	r.addTool(s, cleanCoreTool("write_stdin", desc["write_stdin"], map[string]any{
+		"session_id":        map[string]any{"type": "integer", "description": "Identifier of the running exec session returned by exec_command; distinct from remote_session_id."},
+		"chars":             stringSchema("Bytes to write to stdin. Defaults to empty, which polls without writing."),
+		"yield_time_ms":     numberSchema("Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default."),
+		"max_output_tokens": numberSchema("Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy."),
+		"remote_session_id": remoteSession,
+	}, []string{"session_id"}, mutatingToolAnnotation), r.toolWriteStdin)
+
+	r.addTool(s, cleanCoreTool("apply_patch", desc["apply_patch"], map[string]any{
+		"input":             stringSchema("Raw Codex patch text, beginning with *** Begin Patch and ending with *** End Patch. MCP wraps this freeform text in one input string. Paths are relative to the Remote Session workspace root."),
+		"remote_session_id": remoteSession,
+	}, []string{"input"}, toolAnnotation{ReadOnly: false, Destructive: true, Idempotent: false, OpenWorld: false}), r.toolApplyPatch)
 
 	moveOutTarget := map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
 		"properties": map[string]any{
 			"path":            path,
-			"rev":             stringSchema("普通文件首选；read 返回的 compact file revision。目录省略；Runtime 会在冻结 manifest 前恢复完整 SHA"),
-			"expected_sha256": stringSchema("兼容旧客户端的完整 SHA-256 revision guard；新调用优先使用 rev"),
+			"expected_sha256": stringSchema("可选的完整文件 SHA-256 前置条件；可通过 exec_command 读取当前哈希"),
 		},
 		"required": []string{"path"},
 	}
@@ -298,7 +184,7 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 	r.addTool(s, cleanCoreTool("observe", desc["observe"], map[string]any{
 		"remote_session_id":  remoteSession,
 		"workspace":          workspace,
-		"view":               enumSchema("观察视图；省略时 Runtime 仅在目标唯一时推导，完全无目标参数时默认为 session", "session", "task", "plan", "history", "logs", "diff"),
+		"view":               enumSchema("观察视图；省略时 Runtime 仅在目标唯一时推导，完全无目标参数时默认为 session", "session", "task", "plan", "history", "logs"),
 		"limit":              numberSchema("返回数量限制"),
 		"cursor":             stringSchema("分页游标"),
 		"call_id":            stringSchema("按调用关联 ID 过滤 history"),
@@ -314,8 +200,6 @@ func (r *Runtime) registerCleanCoreTools(s *mcp.Server) {
 		"created_before":     stringSchema("仅返回此时间之前的事件；支持 RFC3339、YYYY-MM-DD 或 Unix 毫秒"),
 		"plan_task_id":       stringSchema("Plan Task ID；view=plan 时使用，也可用于 history 过滤"),
 		"execution_task_id":  stringSchema("执行 Task ID；view=task/logs 时使用，也可用于 history 过滤"),
-		"edit_id":            stringSchema("Edit ID；view=diff 时使用"),
-		"offset":             numberSchema("view=diff 的 UTF-8 字节偏移；可原样使用服务端 next_action 返回值"),
 		"stdout_offset":      numberSchema("view=logs 的 stdout 字节偏移；可原样使用服务端 next_action 返回值"),
 		"stderr_offset":      numberSchema("view=logs 的 stderr 字节偏移；可原样使用服务端 next_action 返回值"),
 	}, []string{"remote_session_id"}, readOnlyToolAnnotation), r.toolObserve)

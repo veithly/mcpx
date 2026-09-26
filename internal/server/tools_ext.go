@@ -175,10 +175,15 @@ func (r *Runtime) toolSecretsProvide(ctx context.Context, req *mcp.CallToolReque
 	values := map[string]string{}
 	if m, ok := envReq.Payload["values"].(map[string]any); ok {
 		for k, v := range m {
-			if s, ok := v.(string); ok {
-				values[k] = s
+			s, ok := v.(string)
+			if !ok || strings.TrimSpace(k) == "" || s == "" {
+				return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "INVALID_ARGUMENTS", "values must contain non-empty names and string values")
 			}
+			values[k] = s
 		}
+	}
+	if len(values) == 0 {
+		return r.terminalError(envReq, remote.ID, remote.WorkspaceName, "INVALID_ARGUMENTS", "values must contain at least one non-empty secret value")
 	}
 	if secretID == "" {
 		refs := r.secrets.Cache(remote.ID, values)

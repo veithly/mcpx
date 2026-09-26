@@ -32,7 +32,7 @@ func planEvidenceSchema() map[string]any {
 		"type": "object",
 		"properties": map[string]any{
 			"kind":         enumSchema("证据类型", plan.EvidenceKinds()...),
-			"reference_id": stringSchema("服务端签发的真实持久化证据引用"),
+			"reference_id": stringSchema("read/edit/execute/verification 使用同一 Remote Session 工具结果 _meta 的 mcpx/request_id；read 对应 exec_command，edit 对应 apply_patch，execute/verification 对应 exec_command 或 write_stdin；必须成功结束且 exit_code=0。source 使用工作区文件路径，observe 使用已完成观测引用，artifact 使用制品 ID"),
 			"metadata":     map[string]any{"type": "object", "additionalProperties": true},
 		},
 		"required": []string{"kind", "reference_id"},
@@ -227,7 +227,7 @@ func (r *Runtime) planError(envReq envelope.Request, session remotesession.Sessi
 	if errors.Is(err, plan.ErrEvidence) || errors.Is(err, plan.ErrEvidenceRequired) {
 		response := envelope.Fail(envelope.StatusError, envReq.RequestID, session.WorkspaceName, nil, code, err.Error())
 		response.RemoteSessionID = session.ID
-		addRecoveryAction(&response, "observe", "读取同一 Remote Session 的真实已完成事件/执行结果，再用 canonical evidence kind 重试", map[string]any{
+		addRecoveryAction(&response, "observe", "读取同一 Remote Session 的真实结果；编程证据用 _meta.mcpx/request_id，等待 exit_code=0 的成功结果后重试", map[string]any{
 			"remote_session_id": session.ID,
 			"view":              "history",
 		})

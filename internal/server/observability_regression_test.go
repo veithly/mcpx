@@ -102,9 +102,13 @@ func TestInstrumentToolSendsNativeProgressHeartbeat(t *testing.T) {
 	toolProgressHeartbeatInterval = 5 * time.Millisecond
 	defer func() { toolProgressHeartbeatInterval = old }()
 
+	release := make(chan struct{})
 	protocol := mcp.NewServer(&mcp.Implementation{Name: "progress-server", Version: "0.1.0"}, nil)
 	handler := (&Runtime{}).instrumentTool("slow_tool", func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-release:
+		case <-time.After(3 * time.Second):
+		}
 		return mcpresult.NewText("done"), nil
 	})
 	protocol.AddTool(&mcp.Tool{Name: "slow_tool", InputSchema: map[string]any{"type": "object"}}, handler)
@@ -118,7 +122,7 @@ func TestInstrumentToolSendsNativeProgressHeartbeat(t *testing.T) {
 		},
 	})
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	serverSession, err := protocol.Connect(ctx, serverTransport, nil)
 	if err != nil {
@@ -133,15 +137,20 @@ func TestInstrumentToolSendsNativeProgressHeartbeat(t *testing.T) {
 
 	params := &mcp.CallToolParams{Name: "slow_tool", Arguments: map[string]any{}}
 	params.SetProgressToken("heartbeat-1")
-	if _, err := clientSession.CallTool(ctx, params); err != nil {
-		t.Fatal(err)
-	}
+	callDone := make(chan error, 1)
+	go func() { _, err := clientSession.CallTool(ctx, params); callDone <- err }()
 	select {
 	case update := <-progress:
+		close(release)
+		if err := <-callDone; err != nil {
+			t.Fatal(err)
+		}
 		if update.ProgressToken != "heartbeat-1" || !strings.Contains(update.Message, "slow_tool is still running") {
 			t.Fatalf("unexpected progress update: %+v", update)
 		}
-	case <-time.After(200 * time.Millisecond):
+	case err := <-callDone:
+		t.Fatalf("tool ended before heartbeat: %v", err)
+	case <-time.After(2 * time.Second):
 		t.Fatal("server did not send native progress heartbeat")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/envelope"
+	"mcpx/internal/file"
 	"mcpx/internal/instruction"
 )
 
@@ -32,6 +33,13 @@ func (r *Runtime) toolAgentInstructionList(ctx context.Context, req *mcp.CallToo
 		}
 	}
 	maxBytes := r.effectiveConfig(ws.Path).Security.Files.MaxReadBytes
+	for _, path := range append([]string{anchor}, paths...) {
+		if path != "" {
+			if _, err := file.Resolve(ws.Path, path); err != nil {
+				return r.terminalError(envReq, remoteID, ws.Name, "INVALID_PATH", "instruction path must stay inside the selected workspace")
+			}
+		}
+	}
 	docs := instruction.DiscoverAt(
 		r.cfg.Discovery.Instructions.GlobalAgentsPath, ws.Path, anchor, maxBytes,
 	)

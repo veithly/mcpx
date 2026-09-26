@@ -46,14 +46,26 @@ func (r *Runtime) toolEnvironmentInspect(ctx context.Context, req *mcp.CallToolR
 	if err != nil {
 		return r.environmentError(envReq, remoteSessionID, workspaceName, err, "invalid_request")
 	}
-	// Persisted snapshots are complete even when the caller requests a subset.
-	fullReport := environment.Inspect(ctx, workspacePath, nil)
+	saveSnapshot := remoteSessionID != ""
+	if explicit, ok := envReq.Payload["save_snapshot"].(bool); ok {
+		saveSnapshot = explicit
+	}
+	compareTo, _ := envReq.Payload["compare_to"].(string)
+	if stringPayload(envReq.Payload, "view") == "compare" && strings.TrimSpace(compareTo) == "" {
+		return r.environmentError(envReq, remoteSessionID, workspaceName, fmt.Errorf("snapshot_id is required for compare"), "invalid_request")
+	}
+	// Only saving a complete snapshot needs every probe. A targeted read must
+	// not execute unrelated toolchain commands or create false comparison diffs.
+	inspectSections := sections
+	if saveSnapshot {
+		inspectSections = nil
+	}
+	fullReport := environment.Inspect(ctx, workspacePath, inspectSections)
 	report := fullReport
 	if len(sections) > 0 {
 		report = environment.SelectSections(fullReport, sections)
 	}
 
-	compareTo, _ := envReq.Payload["compare_to"].(string)
 	if compareTo = strings.TrimSpace(compareTo); compareTo != "" {
 		base, err := r.environment.Get(ctx, compareTo)
 		if err != nil {
@@ -68,14 +80,10 @@ func (r *Runtime) toolEnvironmentInspect(ctx context.Context, req *mcp.CallToolR
 				return r.remoteError(envReq, base.RemoteSessionID, workspaceName, err)
 			}
 		}
-		comparison := environment.Compare(base.ID, base.Report, fullReport)
+		comparison := environment.Compare(base.ID, environment.SelectSections(base.Report, sections), environment.SelectSections(fullReport, sections))
 		report.Comparison = &comparison
 	}
 
-	saveSnapshot := remoteSessionID != ""
-	if explicit, ok := envReq.Payload["save_snapshot"].(bool); ok {
-		saveSnapshot = explicit
-	}
 	if saveSnapshot && remoteSessionID == "" {
 		return r.environmentError(envReq, "", workspaceName, fmt.Errorf("remote_session_id is required to save a snapshot"), "remote_session_required")
 	}

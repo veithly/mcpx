@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"image"
 	"image/draw"
@@ -16,6 +17,8 @@ import (
 )
 
 const maxImageBytes = 8 << 20
+
+var ErrInvalidRequest = errors.New("invalid screenshot request")
 
 type Request struct {
 	Mode        string `json:"mode"`
@@ -67,7 +70,7 @@ func newService(capture nativeCapturer) *Service { return &Service{capture: capt
 func (s *Service) Capture(ctx context.Context, request Request) (Result, error) {
 	request, err := normalizeRequest(request)
 	if err != nil {
-		return Result{}, err
+		return Result{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
 	temporary, err := os.CreateTemp("", "mcpx-screenshot-*.png")
 	if err != nil {

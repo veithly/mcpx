@@ -135,10 +135,6 @@ var (
 	mutatingToolAnnotation = toolAnnotation{ReadOnly: false, Destructive: true, Idempotent: false, OpenWorld: true}
 	sessionToolAnnotation  = toolAnnotation{ReadOnly: false, Destructive: false, Idempotent: false, OpenWorld: false}
 	secretToolAnnotation   = toolAnnotation{ReadOnly: false, Destructive: false, Idempotent: false, OpenWorld: false}
-	// commandExecutionToolAnnotation: whether a command is destructive is
-	// decided by the server-side command policy, not by the tool itself, so
-	// hosts must not gate the call on the destructive hint.
-	commandExecutionToolAnnotation = toolAnnotation{ReadOnly: false, Destructive: false, Idempotent: false, OpenWorld: true}
 )
 
 func annotatedTool(tool mcp.Tool, annotation toolAnnotation) mcp.Tool {
@@ -257,7 +253,8 @@ func activityStringSchema(description string) map[string]any {
 }
 
 func withEmbeddedActivitySchema(tool mcp.Tool) mcp.Tool {
-	if tool.Name == "workspace" {
+	switch tool.Name {
+	case "workspace", "exec_command", "write_stdin", "apply_patch":
 		return tool
 	}
 	if tool.InputSchema == nil {
@@ -327,12 +324,12 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 		"type": "object", "additionalProperties": false,
 		"properties": map[string]any{
 			"id":         stringSchema("批次内唯一的步骤 ID"),
-			"tool":       stringSchema("已注册的公开工具名称"),
+			"tool":       stringSchema("网关管理面工具名称；编程工具 exec_command/write_stdin/apply_patch 直接调用"),
 			"arguments":  map[string]any{"type": "object", "additionalProperties": true, "description": "目标工具的业务参数"},
 			"depends_on": arraySchema(map[string]any{"type": "string"}, "前置步骤 ID"),
 		},
 		"required": []string{"id", "tool", "arguments"},
-	}, "带依赖关系的公开工具操作")
+	}, "带依赖关系的网关管理面操作")
 	operationSteps["maxItems"] = operation.MaxSteps
 	r.addTool(s, supportTool("operation_batch", toolDesc["operation_batch"], map[string]any{
 		"run_id": stringSchema("调用方稳定运行 ID"), "operation_id": stringSchema("调用方稳定操作 ID；同 ID 同计划回读原操作，不重复执行"),
@@ -363,47 +360,6 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 		"remote_session_id": remoteSession,
 		"sections":          arraySchema(map[string]any{"type": "string", "enum": environment.ValidSections}, "环境分区"),
 	}, []string{"remote_session_id"}, sessionToolAnnotation), r.toolEnvironment)
-
-	executeCommon := map[string]any{
-		"remote_session_id": remoteSession, "purpose": stringSchema("本次执行的用户目标"),
-		"idempotency_key": stringSchema("同一执行请求重试时复用的幂等键"),
-		"yield_time_ms":   numberSchema("等待时长"),
-		"user_confirmed":  booleanSchema("用户已确认同一命令或 runtime+script；服务端仍会校验待确认摘要与脚本 SHA"),
-		"execution_mode":  enumSchema("async 表示外层 Operation 异步调度；python/node runtime 使用 Task 生命周期，sqlite readonly query 直接返回结构化结果", "sync", "async"),
-	}
-	executeBranches := map[string]actionSchemaBranch{
-		"run": {Description: "执行 argv+shell=false、command、项目 task，或一次性 runtime+script，四种模式互斥。argv 按元素直接传递；python/node 源码经 stdin+EOF 直接执行且不经过 shell，sqlite 对 Workspace 内现有数据库执行只读单查询并返回结构化行。", Properties: map[string]any{
-			"command": stringSchema("Workspace 内待执行的简单命令"), "task": stringSchema("项目任务名称，与 command/runtime+script 互斥"),
-			"argv":  arraySchema(stringSchema("单个原样传递的参数；第一个元素为可执行文件"), "直接执行的参数数组，与 command/task/runtime+script 互斥"),
-			"shell": booleanSchema("argv 模式必须显式为 false；不通过 shell 或二次拆分"),
-			"workspace_transition": map[string]any{"type": "object", "additionalProperties": false,
-				"properties": map[string]any{"operation_id": stringSchema("稳定身份推进操作 ID"), "head": stringSchema("预先明确的新 Commit SHA"), "tree": stringSchema("该 Commit 的精确 tree SHA")},
-				"required":   []string{"operation_id", "head", "tree"}, "description": "仅用于 git update-ref frozen-ref new-head old-head；执行成功且后置回读吻合才推进冻结身份"},
-			"expected_workspace": map[string]any{
-				"type": "object", "additionalProperties": false,
-				"description": "冻结本次 Git 操作的物理目标与前置身份；路径须在注册 Workspace 内，启动进程前再次核对，实际 cwd 使用此路径",
-				"properties": map[string]any{
-					"canonical_path": stringSchema("精确物理 Git root"), "remote_name": stringSchema("目标 remote 名称"),
-					"remote_sha256": stringSchema("fetch/push remote 精确配置摘要，不传凭据"), "ref": stringSchema("完整 ref 或 DETACHED"),
-					"head": stringSchema("预期前置 HEAD"), "tree": stringSchema("预期前置 HEAD tree"), "run_id": stringSchema("稳定运行 ID"),
-				}, "required": []string{"canonical_path", "remote_name", "remote_sha256", "ref", "head", "tree", "run_id"},
-			},
-			"runtime":  enumSchema("一次性临时运行时；sqlite 仅支持只读查询", "python", "node", "sqlite"),
-			"script":   stringSchema("Python/Node 源码或 SQLite 单条只读查询；最大 65536 bytes。服务端只持久化 SHA/字节数，不把源码写入 Task/audit/observation"),
-			"database": stringSchema("仅 sqlite runtime 使用；Workspace 内现有 SQLite 数据库的相对路径"),
-		}, Required: []string{"remote_session_id", "purpose"}},
-		"attach": {Description: "等待并读取已有执行 Task 的输出；延续既有 Task，不需要客户端重复 purpose。", Properties: map[string]any{
-			"execution_task_id": stringSchema("服务端返回的执行 Task ID"), "stdout_offset": numberSchema("stdout 字节偏移"),
-			"stderr_offset": numberSchema("stderr 字节偏移"),
-		}, Required: []string{"remote_session_id", "execution_task_id"}},
-		"stop": {Description: "停止属于当前 Remote Session 的执行 Task。", Properties: map[string]any{
-			"execution_task_id": stringSchema("服务端返回的执行 Task ID"),
-		}, Required: []string{"remote_session_id", "purpose", "execution_task_id"}},
-		"stdin": {Description: "向交互式执行 Task 写入 stdin。", Properties: map[string]any{
-			"execution_task_id": stringSchema("服务端返回的执行 Task ID"), "input": stringSchema("写入 stdin 的文本"),
-		}, Required: []string{"remote_session_id", "purpose", "execution_task_id", "input"}},
-	}
-	r.addTool(s, cleanActionTool("execute", toolDesc["execute"], executeCommon, executeBranches, commandExecutionToolAnnotation), r.toolExecute)
 
 	planCommon := map[string]any{
 		"remote_session_id": remoteSession, "purpose": stringSchema("本次计划操作的用户目标"),
@@ -542,10 +498,10 @@ func (r *Runtime) registerConsolidatedToolsCatalog(s *mcp.Server) {
 
 	r.addTool(s, supportTool("screenshot_capture", toolDesc["screenshot_capture"], map[string]any{
 		"remote_session_id": remoteSession, "purpose": stringSchema("截取屏幕的用户目标和范围"),
-		"mode": stringSchema("全屏或区域"), "display": numberSchema("显示器索引"),
-		"x": numberSchema("区域 X"), "y": numberSchema("区域 Y"), "width": numberSchema("宽度"), "height": numberSchema("高度"),
-		"compression": stringSchema("压缩模式"), "format": stringSchema("png 或 jpeg"), "quality": numberSchema("JPEG 质量"),
-		"max_width": numberSchema("输出宽度上限"), "max_height": numberSchema("输出高度上限"),
+		"mode": stringSchema("全屏或区域"), "display": map[string]any{"type": "integer", "minimum": 0, "description": "显示器索引"},
+		"x": map[string]any{"type": "integer", "description": "区域 X"}, "y": map[string]any{"type": "integer", "description": "区域 Y"}, "width": map[string]any{"type": "integer", "minimum": 0, "description": "宽度"}, "height": map[string]any{"type": "integer", "minimum": 0, "description": "高度"},
+		"compression": stringSchema("压缩模式"), "format": stringSchema("png 或 jpeg"), "quality": map[string]any{"type": "integer", "minimum": 0, "maximum": 100, "description": "JPEG 质量"},
+		"max_width": map[string]any{"type": "integer", "minimum": 0, "maximum": 16384, "description": "输出宽度上限"}, "max_height": map[string]any{"type": "integer", "minimum": 0, "maximum": 16384, "description": "输出高度上限"},
 	}, []string{"remote_session_id", "purpose"}, readOnlyToolAnnotation), r.toolScreenshotCapture)
 	r.addTool(s, supportTool("secret_provide", toolDesc["secret_provide"], map[string]any{
 		"remote_session_id": remoteSession, "purpose": stringSchema("向当前会话提供 Secret 的用户目标"), "secret_id": stringSchema("Secret ID"),

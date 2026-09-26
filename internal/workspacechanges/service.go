@@ -165,7 +165,7 @@ func (s *Service) Inspect(ctx context.Context, remoteSessionID, workspaceName, w
 		case baseline[entry.Path] || (entry.OriginalPath != "" && baseline[entry.OriginalPath]):
 			entry.Attribution = "preexisting"
 		default:
-			entry.Attribution = "external"
+			entry.Attribution = "unknown"
 		}
 	}
 	report := Report{RemoteSessionID: remoteSessionID, Workspace: workspaceName, GitAvailable: true, GitHead: head, GitRoots: gitRoots, BaselineHead: baselineHead, Entries: entries, InspectedAt: s.now().UTC()}
@@ -218,34 +218,40 @@ func (s *Service) baseline(ctx context.Context, remoteSessionID string) (string,
 	return head, paths, rows.Err()
 }
 
+// mcpxPaths attributes only paths receipted by a successful Codex patch. A
+// command can also modify files, so absence of a receipt never proves an
+// external author. Truncated or malformed receipts leave attribution unknown.
 func (s *Service) mcpxPaths(ctx context.Context, remoteSessionID string) (map[string]bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT result_json FROM clean_edit_records
-        WHERE remote_session_id = ? AND state = 'succeeded'`, remoteSessionID)
+	rows, err := s.db.QueryContext(ctx, `SELECT request_id, result_json FROM tool_results
+        WHERE remote_session_id = ? AND tool_name = 'apply_patch'
+        AND status = 'succeeded' AND exit_code = 0 AND truncated = 0`, remoteSessionID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	paths := map[string]bool{}
 	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
+		var requestID, raw string
+		if err := rows.Scan(&requestID, &raw); err != nil {
 			return nil, err
 		}
 		var result struct {
-			Results []struct {
-				Path    string `json:"path"`
-				NewPath string `json:"new_path"`
-			} `json:"results"`
+			Meta struct {
+				RequestID string   `json:"mcpx/request_id"`
+				Paths     []string `json:"mcpx/patch_paths"`
+			} `json:"_meta"`
+			IsError bool `json:"isError"`
+			Content struct {
+				ExitCode *int `json:"exit_code"`
+			} `json:"structuredContent"`
 		}
-		if err := json.Unmarshal([]byte(raw), &result); err != nil {
-			return nil, fmt.Errorf("decode clean edit record: %w", err)
+		if err := json.Unmarshal([]byte(raw), &result); err != nil || result.IsError ||
+			result.Meta.RequestID != requestID || result.Content.ExitCode == nil || *result.Content.ExitCode != 0 {
+			continue
 		}
-		for _, item := range result.Results {
-			if item.Path != "" {
-				paths[item.Path] = true
-			}
-			if item.NewPath != "" {
-				paths[item.NewPath] = true
+		for _, path := range result.Meta.Paths {
+			if filepath.IsLocal(path) && filepath.Clean(path) != "." {
+				paths[filepath.ToSlash(filepath.Clean(path))] = true
 			}
 		}
 	}

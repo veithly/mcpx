@@ -1,20 +1,25 @@
 package server
 
 import (
-	"context"
-	"errors"
-	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"mcpx/internal/envelope"
-	"mcpx/internal/operation"
 	"mcpx/internal/remotesession"
-	"mcpx/internal/terminal"
 )
+
+func TestProgrammingToolsBypassAsyncOperations(t *testing.T) {
+	for _, name := range []string{"exec_command", "write_stdin", "apply_patch"} {
+		if asyncEligibleTool(name) {
+			t.Errorf("%s must keep its native synchronous/session contract", name)
+		}
+	}
+	if !asyncEligibleTool("artifact") {
+		t.Fatal("unrelated async tools must remain eligible")
+	}
+}
 
 // TestOperationResultPreservesEnvelopeErrorDetail pins the contract that a
 // failed step keeps the envelope's machine-readable error code and message
@@ -47,50 +52,6 @@ func TestPublicToolFailureFromTextEnvelopeAndFallback(t *testing.T) {
 	bare := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: `{"status":"failed"}`}}}
 	if got := publicToolFailure(bare); got.Error() != "public tool execution failed" {
 		t.Fatalf("fallback error=%v", got)
-	}
-}
-
-// TestWaitForOperationTaskKillsTaskOnCancel proves that an operation step
-// whose wait context is cancelled (operation cancel or step deadline) kills
-// the underlying terminal Task instead of leaving the shell process running.
-func TestWaitForOperationTaskKillsTaskOnCancel(t *testing.T) {
-	manager := terminal.NewTaskManager()
-	r := &Runtime{tasks: manager}
-	task, err := manager.StartRemoteWithObservation(
-		context.Background(), "req_kill", "execute", "rs_kill", "demo", t.TempDir(), "sleep 30",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result := &mcp.CallToolResult{Content: []mcp.Content{
-		&mcp.TextContent{Text: fmt.Sprintf(`{"execution_task_id":%q}`, task.ID)},
-	}}
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		cancel()
-	}()
-	input := operation.ExecuteInput{
-		OperationID: "op_kill", StepID: "main", RequestID: "req_kill",
-		RemoteSessionID: "rs_kill", WorkspaceName: "demo", Purpose: "kill on cancel", Tool: "execute",
-	}
-	_, waitErr := r.waitForOperationTask(ctx, input, result)
-	cancel()
-	if !errors.Is(waitErr, context.Canceled) {
-		t.Fatalf("wait error=%v, want context.Canceled", waitErr)
-	}
-	doneCtx, doneCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer doneCancel()
-	if !task.Wait(doneCtx) {
-		t.Fatal("killed task did not reach a terminal state")
-	}
-	if status := task.StatusView()["status"]; status != terminal.TaskKilled {
-		t.Fatalf("task status=%v, want killed", status)
-	}
-	// A second kill stays a no-op (idempotent), matching the operation layer's
-	// timeout+cancel double path.
-	if err := task.Kill(); err != nil {
-		t.Fatal(err)
 	}
 }
 

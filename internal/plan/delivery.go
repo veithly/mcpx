@@ -8,11 +8,6 @@ import (
 	"time"
 )
 
-type taskOutcome struct {
-	Status   string
-	ExitCode int
-}
-
 func deliveryChecks(ctx context.Context, tx *sql.Tx, remoteSessionID string, item Plan, now time.Time) ([]DeliveryCheck, []string, error) {
 	blockers := make([]string, 0)
 	incomplete := make([]string, 0)
@@ -37,8 +32,8 @@ func deliveryChecks(ctx context.Context, tx *sql.Tx, remoteSessionID string, ite
 	}
 
 	failedVerification := make([]string, 0)
-	editIDs := make([]string, 0)
-	executionTaskIDs := make([]string, 0)
+	toolEvidence := make([]Evidence, 0)
+	requestIDs := make([]string, 0)
 	artifactIDs := make([]string, 0)
 	for _, task := range item.Tasks {
 		for _, evidence := range task.Evidence {
@@ -46,10 +41,9 @@ func deliveryChecks(ctx context.Context, tx *sql.Tx, remoteSessionID string, ite
 				failedVerification = append(failedVerification, evidence.ID)
 			}
 			switch evidence.Kind {
-			case EvidenceEdit:
-				editIDs = append(editIDs, evidence.ReferenceID)
-			case EvidenceExecute:
-				executionTaskIDs = append(executionTaskIDs, evidence.ReferenceID)
+			case EvidenceRead, EvidenceEdit, EvidenceExecute, EvidenceVerification:
+				toolEvidence = append(toolEvidence, evidence)
+				requestIDs = append(requestIDs, evidence.ReferenceID)
 			case EvidenceArtifact:
 				artifactIDs = append(artifactIDs, evidence.ReferenceID)
 			}
@@ -61,7 +55,7 @@ func deliveryChecks(ctx context.Context, tx *sql.Tx, remoteSessionID string, ite
 		blockers = append(blockers, "verification_failed")
 	}
 
-	tasks, err := queryTaskOutcomes(ctx, tx, remoteSessionID, executionTaskIDs)
+	outcomes, err := queryToolOutcomes(ctx, tx, remoteSessionID, requestIDs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -69,34 +63,18 @@ func deliveryChecks(ctx context.Context, tx *sql.Tx, remoteSessionID string, ite
 	if err != nil {
 		return nil, nil, err
 	}
-	executionBlockers := make([]string, 0)
-	for _, id := range uniqueStrings(executionTaskIDs) {
-		outcome, ok := tasks[id]
-		if !ok || outcome.Status != "exited" || outcome.ExitCode != 0 {
-			executionBlockers = append(executionBlockers, "execution_task_failed:"+id)
+	evidenceBlockers := make([]string, 0)
+	for _, evidence := range toolEvidence {
+		if err := outcomes[evidence.ReferenceID].validate(evidence.Kind, evidence.ReferenceID); err != nil {
+			evidenceBlockers = append(evidenceBlockers, "tool_result_invalid:"+evidence.ReferenceID)
 		}
 	}
 	for _, id := range uniqueStrings(artifactIDs) {
 		if !artifacts[id] {
-			executionBlockers = append(executionBlockers, "artifact_missing:"+id)
+			evidenceBlockers = append(evidenceBlockers, "artifact_missing:"+id)
 		}
 	}
-	if len(executionBlockers) != 0 {
-		blockers = append(blockers, executionBlockers...)
-	}
-	editStatuses, err := queryCleanEditStatuses(ctx, tx, remoteSessionID, editIDs)
-	if err != nil {
-		return nil, nil, err
-	}
-	editBlockers := make([]string, 0)
-	for _, id := range uniqueStrings(editIDs) {
-		if status, ok := editStatuses[id]; !ok || status != "succeeded" {
-			editBlockers = append(editBlockers, "edit_not_succeeded:"+id)
-		}
-	}
-	if len(editBlockers) != 0 {
-		blockers = append(blockers, editBlockers...)
-	}
+	blockers = append(blockers, evidenceBlockers...)
 
 	var pendingApprovals int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM approvals WHERE remote_session_id = ? AND status = 'pending' AND expires_at > ?`, remoteSessionID, now.UnixMilli()).Scan(&pendingApprovals); err != nil {
@@ -107,40 +85,13 @@ func deliveryChecks(ctx context.Context, tx *sql.Tx, remoteSessionID string, ite
 		checks[len(checks)-1].Details = map[string]any{"pending": pendingApprovals}
 		blockers = append(blockers, "pending_approvals")
 	}
-	if len(executionBlockers) != 0 || len(editBlockers) != 0 {
-		items := append(append([]string{}, executionBlockers...), editBlockers...)
-		checks = append(checks, DeliveryCheck{Code: "execution_evidence_valid", Passed: false, Message: "execution or edit evidence is incomplete", Details: map[string]any{"items": items}})
-	} else {
-		checks = append(checks, DeliveryCheck{Code: "execution_evidence_valid", Passed: true, Message: "execution and artifact evidence is available"})
+	check := DeliveryCheck{Code: "execution_evidence_valid", Passed: len(evidenceBlockers) == 0, Message: "read, edit, execution and verification requests completed successfully; artifacts are available"}
+	if !check.Passed {
+		check.Message = "tool result or artifact evidence is missing, unsuccessful or belongs to another session"
+		check.Details = map[string]any{"items": uniqueStrings(evidenceBlockers)}
 	}
+	checks = append(checks, check)
 	return checks, uniqueStrings(blockers), nil
-}
-
-func queryCleanEditStatuses(ctx context.Context, tx *sql.Tx, remoteSessionID string, ids []string) (map[string]string, error) {
-	result := make(map[string]string)
-	ids = uniqueStrings(ids)
-	if len(ids) == 0 {
-		return result, nil
-	}
-	query := `SELECT id, state FROM clean_edit_records WHERE remote_session_id = ? AND id IN (` + placeholders(len(ids)) + `)`
-	args := make([]any, 0, len(ids)+1)
-	args = append(args, remoteSessionID)
-	for _, id := range ids {
-		args = append(args, id)
-	}
-	rows, err := tx.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, status string
-		if err := rows.Scan(&id, &status); err != nil {
-			return nil, err
-		}
-		result[id] = status
-	}
-	return result, rows.Err()
 }
 
 func evidenceFailed(evidence Evidence) bool {
@@ -162,34 +113,6 @@ func evidenceFailed(evidence Evidence) bool {
 		return true
 	}
 	return false
-}
-
-func queryTaskOutcomes(ctx context.Context, tx *sql.Tx, remoteSessionID string, ids []string) (map[string]taskOutcome, error) {
-	result := make(map[string]taskOutcome)
-	ids = uniqueStrings(ids)
-	if len(ids) == 0 {
-		return result, nil
-	}
-	query := `SELECT id, status, COALESCE(exit_code, -1) FROM terminal_tasks WHERE remote_session_id = ? AND id IN (` + placeholders(len(ids)) + `)`
-	args := make([]any, 0, len(ids)+1)
-	args = append(args, remoteSessionID)
-	for _, id := range ids {
-		args = append(args, id)
-	}
-	rows, err := tx.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, status string
-		var exitCode int
-		if err := rows.Scan(&id, &status, &exitCode); err != nil {
-			return nil, err
-		}
-		result[id] = taskOutcome{Status: status, ExitCode: exitCode}
-	}
-	return result, rows.Err()
 }
 
 func queryExistingIDs(ctx context.Context, tx *sql.Tx, table, remoteSessionID string, ids []string) (map[string]bool, error) {

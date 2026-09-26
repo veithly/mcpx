@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -191,6 +192,25 @@ func (s *Service) Read(ctx context.Context, remoteSessionID, artifactID, workspa
 		}
 		buffer = buffer[:read]
 		end = start + int64(read)
+		if (source.Encoding == SourceEncodingUTF16LE || source.Encoding == SourceEncodingUTF16BE) && end < artifact.Size && len(buffer) >= 2 {
+			var order binary.ByteOrder = binary.LittleEndian
+			if source.Encoding == SourceEncodingUTF16BE {
+				order = binary.BigEndian
+			}
+			last := order.Uint16(buffer[len(buffer)-2:])
+			if last >= 0xd800 && last <= 0xdbff {
+				var next [2]byte
+				if n, _ := handle.ReadAt(next[:], end); n == 2 {
+					low := order.Uint16(next[:])
+					if low >= 0xdc00 && low <= 0xdfff {
+						// Complete the pair so a successful text page never invents
+						// replacement characters. This may exceed limit by 2 bytes.
+						buffer = append(buffer, next[:]...)
+						end += 2
+					}
+				}
+			}
+		}
 	}
 	result := ReadResult{
 		Artifact: artifact, SourceEncoding: artifact.SourceEncoding, SourceBOM: artifact.SourceBOM,

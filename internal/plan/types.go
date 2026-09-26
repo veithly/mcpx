@@ -1,5 +1,5 @@
-// Package plan persists and advances MCPX execution plans independently from
-// terminal Execution Tasks.
+// Package plan persists MCPX plans and validates programming evidence against
+// request-addressable Codex tool results.
 package plan
 
 import (
@@ -116,6 +116,8 @@ type CreateInput struct {
 	Tasks   []TaskInput `json:"tasks"`
 }
 
+// EvidenceInput uses a tool_results request_id for read, edit, execute and
+// verification. These are business categories, not callable tool names.
 type EvidenceInput struct {
 	Kind        string         `json:"kind"`
 	ReferenceID string         `json:"reference_id"`

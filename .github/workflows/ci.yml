@@ -17,6 +17,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Verify native programming toolchain
+        run: |
+          go test -p 1 ./internal/unifiedexec ./internal/patch -count=1
+          go test -p 1 ./internal/server -run '^TestProgramming' -parallel 2 -count=1
       - name: Format
         run: test -z "$(gofmt -l ./cmd ./internal)"
       - name: Vet
@@ -30,3 +34,15 @@ jobs:
           VERSION_OUTPUT="$(./bin/mcpx -version)"
           [[ "${VERSION_OUTPUT}" == *"commit=${BUILD_COMMIT}"* ]]
           [[ "${VERSION_OUTPUT}" != *"date=unknown"* ]]
+      - name: Native HTTP smoke with external-tool traps
+        run: |
+          python3 scripts/toolchain-probe.py \
+            --binary bin/mcpx \
+            --output-dir "${RUNNER_TEMP}/mcpx-native-toolchain"
+      - name: Upload native smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-toolchain-smoke-linux
+          path: ${{ runner.temp }}/mcpx-native-toolchain
+          if-no-files-found: ignore

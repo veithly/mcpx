@@ -176,15 +176,22 @@ func TestTransportSessionBindingAllowsImplicitRemoteSession(t *testing.T) {
 		t.Fatalf("transport B binding=%q want=%q", got, idB)
 	}
 
-	wrapped := rt.instrumentTool("read", rt.toolRead)
-	result, err := wrapped(ctxA, mcpresult.Request(map[string]any{"view": "file", "path": "bound.txt"}))
+	registered := callEnvelope(t, rt.toolHandlers["artifact"], ctxA, map[string]any{
+		"action": "register", "path": "bound.txt", "purpose": "register binding fixture",
+	})
+	if !statusOK(registered) {
+		t.Fatalf("bound artifact registration failed: %+v", registered)
+	}
+	artifactID := registered["data"].(map[string]any)["artifact_id"].(string)
+	wrapped := rt.toolHandlers["artifact"]
+	result, err := wrapped(ctxA, mcpresult.Request(map[string]any{"action": "read", "artifact_id": artifactID}))
 	if err != nil || result.IsError {
-		t.Fatalf("implicit bound read failed: err=%v result=%+v", err, result)
+		t.Fatalf("implicit bound artifact read failed: err=%v result=%+v", err, result)
 	}
 	structured, _ := result.StructuredContent.(map[string]any)
 	data, _ := structured["data"].(map[string]any)
-	if data["content"] != "bound-session\n" || data["rev"] == nil || data["sha256"] != nil {
-		t.Fatalf("implicit bound read data=%+v", data)
+	if data["text"] != "bound-session\n" {
+		t.Fatalf("implicit bound artifact data=%+v", data)
 	}
 	encoded, _ := json.Marshal(structured)
 	if strings.Contains(string(encoded), "remote_session_id") {
@@ -192,14 +199,17 @@ func TestTransportSessionBindingAllowsImplicitRemoteSession(t *testing.T) {
 	}
 	semantic, _ := structured["context"].(map[string]any)
 	if semantic["operation_id"] != nil {
-		t.Fatalf("ordinary read leaked correlation operation_id: %+v", semantic)
+		t.Fatalf("ordinary artifact read leaked correlation operation_id: %+v", semantic)
 	}
-
+	other, err := wrapped(ctxB, mcpresult.Request(map[string]any{"action": "read", "artifact_id": artifactID}))
+	if err != nil || other == nil || !other.IsError {
+		t.Fatalf("transport B read transport A artifact: err=%v result=%+v", err, other)
+	}
 	asyncResult, err := wrapped(ctxA, mcpresult.Request(map[string]any{
-		"view": "list", "path": ".", "purpose": "verify bound async read", "execution_mode": "async", "limit": 5,
+		"action": "list", "purpose": "verify bound async management", "execution_mode": "async", "limit": 5,
 	}))
 	if err != nil || asyncResult.IsError {
-		t.Fatalf("implicit bound async read failed: err=%v result=%+v", err, asyncResult)
+		t.Fatalf("implicit bound async management failed: err=%v result=%+v", err, asyncResult)
 	}
 	asyncStructured, _ := asyncResult.StructuredContent.(map[string]any)
 	asyncData, _ := asyncStructured["data"].(map[string]any)

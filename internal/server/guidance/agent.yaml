@@ -1,36 +1,39 @@
-version: "2.0"
+version: "3.0"
 priority: high
-summary: 使用 MCPX 的结构化工具完成开发工作；模型负责工程判断，Runtime 负责协议、安全、恢复与观测。
+summary: 使用 MCPX 原生编程工具执行命令与补丁；核心逻辑参照 Codex 源码移植，无需 Codex 可执行文件。
 rules:
-  - 工具的 structuredContent 是机器事实来源；remote_session_id、plan_id、plan_task_id、execution_task_id、operation_id、artifact_id、sha256、revision 和 confirmation token 必须从服务端结果原样复用，不要从展示文本解析或凭记忆重建。
-  - remote_session_id 丢失、未知或返回 not_found 时，先调用 session(action=list，可带 workspace/query/status) 发现已有 Remote Session；根据 workspace、label、status 和 last_active_at 识别目标，再用返回的完整 remote_session_id 调用 session(action=open) 恢复，不要通过新建 Session 假装 resume。
-  - 不要猜测路径、API、符号、ID、revision、工具能力或执行结果；先用对应的只读工具取得证据。没有成功工具结果或验证证据时，不得声称已读取、修改、修复、构建或测试通过。
-  - 每种语义使用唯一 canonical tool：源码/文件读取用 read，环境事实用 environment_read，文件变更用 edit，删除/移出用 move_out，命令/测试/构建用 execute，Session/Task/Plan/历史/日志用 observe，浏览器操作用 browser；强类型 Browser 动作不足时才用 action=official，官方权限提示需用户确认后原参数重试；不要用 execute 代替文件、环境或浏览器通道。
-  - 修改前取得足够的当前证据并保留用户未要求的现有变更；只提交完成目标所需的最小改动。update/rename 使用服务端 read 返回的最新 rev，保持原文件编码、BOM、换行和末尾换行。
-  - effectful 工具的 purpose 必须真实描述当前用户目标、对象和实际影响；测试会执行项目代码，构建可能写缓存或产物，安装/发布/推送/部署/删除等不得虚构为只读或虚构用户授权。
-  - edit 或其他操作遇到 STALE_REVISION、冲突或限制时，以 structuredContent.actions 作为唯一模型侧 continuation/recovery 动作；error 只承载错误事实。刷新服务端要求的证据后再重试，不要自行发明恢复协议或重放未知状态请求。
-  - 删除、移除或清理只使用 move_out 的 prepare → 用户确认 → submit 协议；confirmation_uuid 和冻结参数由服务端绑定，submit 只按服务端返回的确认动作继续，不要改用 execute 删除。
-  - execute 只运行目标确实需要的命令；按真实副作用描述 purpose，并以实际 exit_code/stdout/stderr/Task 状态作为验证证据。长任务返回 execution_task_id 后，用 observe(task/logs) 或 execute(attach) 继续。临时多行 Python/Node 且不创建 Workspace 文件时，可用 execute(action=run, runtime=python|node, script=...)。
-  - observe 只观察 Runtime：无目标参数默认 session，execution_task_id 推导 task，plan_task_id 推导 plan，history 过滤条件推导 history，execution_task_id 配合 view=logs 读取日志；Workspace 当前静态内容始终使用 read。
-  - 会话内实质工作必须持续提交公开 Activity：新工作 turn 的首个实质工具调用必须携带 activity.intent；后续获得新的可核验事实、形成稳定结论或选择新的立即动作时，必须在对应工具调用中提交 activity.evidence、activity.conclusion 或 activity.next。纯 heartbeat、重复读取状态或语义未变化的调用可以省略 activity。一次调用可同时填写 intent/hypothesis/evidence/conclusion/next/status，但只填写本次发生实质变化的字段，不重复未变化内容。intent 是整个工作 turn 的目标；hypothesis 是可被后续证据推翻的暂定判断；evidence 只记录刚获得的可核验事实，不夹带推断；conclusion 是由 evidence 支持的当前稳定判断；next 应与本次正在发起的 tool call 对齐；status 只表示无法归入前五类的阶段、等待或阻塞变化，不作为 heartbeat，也不替代 progress 的业务里程碑。Runtime 按固定顺序展开非空字段并自动生成 turn_id、sequence、state=preparing_action、related_call_id；这些协议字段不得由客户端维护。Activity 内容只能是可展示的公开工作摘要，不是隐藏推理链。
-  - Session 返回的 extension_inventory 是当前可用能力的一部分，不是单纯元数据；当 Skill 或 MCP 明显匹配、很可能匹配或能提供领域专用工作流时，优先评估该扩展。
-  - Skill 的发现、详情读取和调用统一使用 skill_tool：不知道有哪些时 list；知道名字但缺少详细规则时 describe；已有足够信息时 call。模型不得维护 Skill revision token，Runtime 负责一致性校验。
-  - 上游 MCP Server/Tool 的发现、详情读取和调用统一使用 mcp_tool：不知道 Server 时 list；知道 Server 但不知道 Tools 时 list(server)；缺少 Tool schema 时 describe；参数已知时 call。模型不得维护 MCP schema revision token，Runtime 负责一致性校验。
-  - progress 不作为每次工具调用的 bookkeeping；过程只在有业务意义的里程碑、等待用户、阻塞或失败时发布。任务正常完成并准备给用户最终回复前，必须调用一次 progress(status="completed")，用 current 汇总完成状态、result 列出已验证结果；若终止于等待、阻塞或失败，则使用对应 terminal status。
-  - 验证遵循“最小充分证据”：优先运行与改动直接相关的检查，再按风险扩大；明确区分已验证事实、未验证事项和服务端报告的限制。
+  - 编程核心只有 exec_command、write_stdin、apply_patch；由 MCPX 内部 unifiedexec/patch 包执行，不启动 Codex CLI 或 exec-server，不调用模型/API。其余工具属于 MCPX 网关管理面，用于会话、计划、观测、产物和扩展。
+  - 不要猜测路径、符号、工具能力或执行结果。源码读取、列表和搜索直接用 exec_command 运行 rg、cat、sed 等命令；参数已知即可调用，无需先 describe、维护文件 revision token 或选择 read 视图。
+  - exec_command 的 cmd 是原始 shell 命令；workdir 默认当前 Remote Session 的 Workspace 根目录，物理路径必须在该 Workspace 内。需要交互终端时设 tty=true；shell 是可执行路径，login 控制登录 shell 语义。
+  - exec_command/write_stdin 的 structuredContent 直接提供 output、exit_code 或仍在运行的整数 session_id；stdout/stderr 合并在 output。非零退出是命令执行结果，应结合输出判断，不能当成 MCP 协议错误或自动重试信号。
+  - 长命令用返回的整数 session_id 调用 write_stdin；chars 为空或省略表示等待新输出，有内容表示写入 stdin。session_id 是进程句柄，不是 remote_session_id、execution_task_id 或 operation_id；不要自行转换或重建。
+  - apply_patch 只接收包含 Codex 格式原始补丁的 input 字符串；MCP 的 JSON 对象只是传输包装。补丁从 *** Begin Patch 到 *** End Patch，支持 Add/Update/Delete/Move；路径相对 session root，不接受 workdir 或旧 edits/rev 参数。
+  - 修改前读取足够的当前证据并保留已有用户改动；补丁结果读取 MCPX 本地 backend 的输出；查看源码差异时用 exec_command 运行 git diff。补丁失败时检查原始输出，重新读取相关文件后修正补丁，不盲目重放。验证遵循最小充分证据，区分已验证事实、未验证事项和服务端限制。
+  - MCPX 强制应用当前权限配置；编程工具不提供 sandbox_permissions，也不接收 purpose/user_confirmed。Runtime 从原始 cmd/input 推导操作用途，Confirm 由现有 console 审批；这与 Codex 自身的 sandbox/approval 参数体系不同。
+  - 源码移植只覆盖选定的进程与补丁逻辑，不代表完整 Codex sandbox、模型 agent 或全面逐行等价；Workspace 路径检查不等于 OS 沙箱。不得把可选外部 baseline 差分当成默认运行依赖。
+  - 编程工具直接调用，不套用 ARC、自动 replay 或 Operation；再次 exec_command 是一次新的执行。需要并行的命令由客户端并发调用，分别保留进程句柄。operation_batch/operation_manage 仅用于网关管理面工作。
+  - remote_session_id 是 Workspace 和角色的路由上下文；当前 MCP transport 已绑定时可省略。丢失或失效时用 session(action=list) 找到目标，再用服务端返回的完整 ID 恢复；不要通过新建会话假装恢复原会话。进程句柄不承诺跨 Runtime 重启恢复。
+  - 管理面按各自 schema 调用；observe 查看网关会话、历史和持久任务，process 输出仍用 write_stdin。move_out 提供独立的 prepare → 用户确认 → submit 安全移出流程，不承担补丁编辑。扩展仅在任务需要时通过 skill_tool/mcp_tool 的 list、describe、call 使用。
+  - 管理面支持的 activity 仅填写新的公开工作摘要，不重复 heartbeat，不记录隐藏推理。progress 用于有意义的里程碑、等待、阻塞或失败；正常任务最终回复前用 completed 和 result 汇报已验证结果。编程工具不要求这些附加参数。
 tool_routing:
+  inspect_source: [exec_command]
+  run_commands: [exec_command]
+  continue_process: [write_stdin]
+  modify_files: [apply_patch]
+  inspect_changes: [exec_command]
   select_workspace: [workspace]
   session_lifecycle: [session]
-  inspect_source: [read]
   inspect_environment: [environment_read]
   snapshot_environment: [environment]
-  modify_files: [edit]
-  remove_files: [move_out]
-  run_commands: [execute]
-  observe_work: [observe]
+  safe_move_out: [move_out]
+  observe_gateway: [observe]
   report_milestone: [progress]
   plan_work: [plan]
   manage_artifacts: [artifact]
+  manage_operations: [operation_batch, operation_manage]
+  inspect_gateway: [runtime_read]
   skill_extension: [skill_tool]
   mcp_extension: [mcp_tool]
   browser_control: [browser]
+  capture_screen: [screenshot_capture]
+  provide_secret: [secret_provide]

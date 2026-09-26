@@ -1,0 +1,2 @@
+internal/patch/testdata/scenarios/018_whitespace_padded_patch_markers/patch.txt -whitespace
+internal/patch/testdata/scenarios/020_whitespace_padded_patch_marker_lines/patch.txt -whitespace

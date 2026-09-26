@@ -160,6 +160,14 @@ func (s *Store) TakePending(id string) (PendingSecret, bool) {
 
 // Provide stores values under secret_id as ref names and returns pending if any.
 func (s *Store) Provide(remoteSessionID, secretID string, values map[string]string) (PendingSecret, error) {
+	if len(values) == 0 {
+		return PendingSecret{}, fmt.Errorf("secret values are required")
+	}
+	for name, value := range values {
+		if name == "" || value == "" {
+			return PendingSecret{}, fmt.Errorf("secret names and values must be non-empty")
+		}
+	}
 	p, ok := s.TakePending(secretID)
 	if !ok {
 		return PendingSecret{}, fmt.Errorf("unknown secret_id")

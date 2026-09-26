@@ -73,28 +73,17 @@ func TestReplayKeyExcludesPerAttemptFields(t *testing.T) {
 	}
 }
 
-func TestReplayDeliversCompletedAttemptAndHonorsRerun(t *testing.T) {
+func TestReplayCompletedAttemptAllowsNewExecution(t *testing.T) {
 	r := &Runtime{}
-	args := replayTestArgs("git status")
-	entry, owned := r.toolReplays.begin(r.toolReplayKey("git", args))
+	args := replayTestArgs("npm run check")
+	entry, owned := r.toolReplays.begin(r.toolReplayKey("execute", args))
 	if !owned {
-		t.Fatal("fresh key must register an owned entry")
+		t.Fatal("fresh entry not owned")
 	}
-	r.toolReplayFinish(context.Background(), entry, mcpresult.NewText("clean"), false)
-
-	_, delivered, replayed := r.replayDeliver(context.Background(), context.Background(), "git", mcpresult.Request(args), false)
-	if !delivered || replayed == nil {
-		t.Fatal("a completed entry must replay even when its client stayed attached")
-	}
-	if reason, _ := replayed.Meta["replay_reason"].(string); reason != "prior attempt already completed" {
-		t.Fatalf("replay_reason = %q, want prior attempt already completed", reason)
-	}
-
-	rerun := replayTestArgs("git status")
-	rerun["rerun"] = true
-	fresh, replaying, _ := r.replayDeliver(context.Background(), context.Background(), "git", mcpresult.Request(rerun), false)
-	if replaying || fresh == nil {
-		t.Fatal("rerun=true must opt out of replay and register a fresh owned entry")
+	r.toolReplayFinish(context.Background(), entry, mcpresult.NewText("old outcome"), false)
+	fresh, delivered, _ := r.replayDeliver(context.Background(), context.Background(), "execute", mcpresult.Request(args), false)
+	if delivered || fresh == nil || fresh == entry {
+		t.Fatal("normal repeat must start new work, not replay old results")
 	}
 }
 
@@ -319,13 +308,14 @@ func TestReplayEntriesSurviveRuntimeRestart(t *testing.T) {
 	if !strings.Contains(reason, "service restart recovery") {
 		t.Fatalf("restored entry must present as restart recovery, reason=%q", reason)
 	}
-	// rerun must still force fresh execution on top of a restored entry.
-	rerun := replayTestArgs("npm run build")
-	rerun["rerun"] = true
-	fresh, replaying, _ := restarted.replayDeliver(context.Background(), context.Background(), "execute", mcpresult.Request(rerun), false)
-	if replaying || fresh == nil {
-		t.Fatal("rerun=true must opt out of a restored replay and register a fresh owned entry")
+	// A deliberate new execution uses the existing public idempotency contract.
+	keyed := replayTestArgs("npm run build")
+	keyed["idempotency_key"] = "new-execution"
+	fresh, replaying, _ := restarted.replayDeliver(context.Background(), context.Background(), "execute", mcpresult.Request(keyed), false)
+	if replaying || fresh != nil {
+		t.Fatal("new keyed execution must use the idempotency store")
 	}
+
 }
 
 func TestReplayPersistPrunesExpiredRows(t *testing.T) {
@@ -374,5 +364,30 @@ func TestReplayPersistPrunesExpiredRows(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("tool_replays rows=%d, want only the fresh entry after TTL prune", count)
+	}
+}
+
+func TestReplayCompletedOutcomeIsNotRestoredAsInterrupted(t *testing.T) {
+	t.Setenv("MCPX_HOME", t.TempDir())
+	rt := newReplayPersistRuntime(t)
+	args := replayTestArgs("npm run check")
+	key := rt.toolReplayKey("execute", args)
+	entry, _, _ := rt.replayDeliver(context.Background(), context.Background(), "execute", mcpresult.Request(args), false)
+	rt.toolReplayFinish(context.Background(), entry, mcpresult.NewText("old check"), true)
+	waitForReplayRow(t, rt, key)
+	// A newer, normally delivered execution supersedes the old interruption.
+	fresh, owned := rt.toolReplays.beginFreshTracked(key, "execute", args)
+	if !owned {
+		t.Fatal("fresh effect not owned")
+	}
+	rt.toolReplayFinish(context.Background(), fresh, mcpresult.NewText("new check"), false)
+	if err := rt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted := newReplayPersistRuntime(t)
+	defer restarted.Close()
+	next, delivered, _ := restarted.replayDeliver(context.Background(), context.Background(), "execute", mcpresult.Request(args), false)
+	if delivered || next == nil {
+		t.Fatal("completed outcome became interrupted after restart")
 	}
 }

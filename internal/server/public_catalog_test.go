@@ -80,42 +80,15 @@ func TestPublicCatalogSchemaTotalBytes(t *testing.T) {
 	}
 }
 
-func TestPublicExecuteOmitsSingleValueScopeAndActionRootDescription(t *testing.T) {
-	runtime := &Runtime{}
-	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
-	runtime.registerTools(protocol)
-
-	execute := runtime.listedToolMap()["execute"]
-	var executeSchema map[string]any
-	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(execute), &executeSchema); err != nil {
-		t.Fatal(err)
-	}
-	properties, _ := executeSchema["properties"].(map[string]any)
-	if properties["scope"] != nil {
-		t.Fatalf("public execute schema must not expose single-value scope: %s", mcpresult.ToolSchemaJSON(execute))
-	}
-
-	for name, tool := range runtime.listedToolMap() {
-		var schema map[string]any
-		if err := json.Unmarshal(mcpresult.ToolSchemaJSON(tool), &schema); err != nil {
-			t.Fatalf("%s schema: %v", name, err)
-		}
-		rootDescription, _ := schema["description"].(string)
-		if rootDescription != "" && rootDescription == tool.Description {
-			t.Fatalf("%s repeats Tool.Description in InputSchema root", name)
-		}
-	}
-}
-
-func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
+func TestPublicCatalogIsExactlyTheCodexAndManagementContract(t *testing.T) {
 	runtime := &Runtime{}
 	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
 	runtime.registerTools(protocol)
 
 	want := []string{
-		"workspace", "session", "read", "edit", "move_out", "observe", "progress",
+		"workspace", "session", "exec_command", "write_stdin", "apply_patch", "move_out", "observe", "progress",
 		"operation_batch", "operation_manage",
-		"execute", "plan", "artifact", "skill_tool", "mcp_tool", "browser",
+		"plan", "artifact", "skill_tool", "mcp_tool", "browser",
 		"runtime_read", "environment_read", "environment", "screenshot_capture", "secret_provide",
 	}
 	got := make([]string, 0, len(runtime.listedToolMap()))
@@ -127,16 +100,16 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("public tool catalog = %v, want %v", got, want)
 	}
-	for _, legacy := range []string{"change", "change_read", "change_prepare", "change_execute", "change_manage", "move_out_prepare", "submit_move_out", "command_run", "command_execute", "task_read", "task", "plan_read", "extension_discover", "artifact_read", "discover", "skill_call", "mcp_call"} {
+	for _, legacy := range []string{"read", "edit", "execute", "change", "change_read", "change_prepare", "change_execute", "change_manage", "move_out_prepare", "submit_move_out", "command_run", "command_execute", "task_read", "task", "plan_read", "extension_discover", "artifact_read", "discover", "skill_call", "mcp_call"} {
 		if runtime.toolHandlers[legacy] != nil {
 			t.Fatalf("legacy handler %q must not be dispatchable", legacy)
 		}
 	}
 
 	for name, registered := range runtime.listedToolMap() {
-		if name == "mcp_tool" {
+		if name == "mcp_tool" || isProgrammingTool(name) {
 			if registered.OutputSchema != nil {
-				t.Fatalf("mcp_tool must omit OutputSchema: %+v", registered.OutputSchema)
+				t.Fatalf("%s must omit OutputSchema: %+v", name, registered.OutputSchema)
 			}
 		} else if registered.OutputSchema == nil {
 			t.Fatalf("%s must expose the ARC structuredContent output schema", name)
@@ -170,10 +143,10 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		if properties["task_id"] != nil {
 			t.Fatalf("%s must not expose ambiguous task_id: %s", name, mcpresult.ToolSchemaJSON(registered))
 		}
-		if properties["session_id"] != nil {
+		if name != "write_stdin" && properties["session_id"] != nil {
 			t.Fatalf("%s must use remote_session_id: %s", name, mcpresult.ToolSchemaJSON(registered))
 		}
-		if _, clean := map[string]bool{"session": true, "read": true, "edit": true, "observe": true}[name]; clean && properties["remote_session_id"] == nil {
+		if _, clean := map[string]bool{"session": true, "exec_command": true, "write_stdin": true, "apply_patch": true, "observe": true}[name]; clean && properties["remote_session_id"] == nil {
 			t.Fatalf("%s must expose remote_session_id", name)
 		}
 		required, _ := schema["required"].([]any)
@@ -232,58 +205,6 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		t.Fatalf("workspace must be a zero-argument catalog query: %s", mcpresult.ToolSchemaJSON(workspaceTool))
 	}
 
-	readTool := runtime.listedToolMap()["read"]
-	var readSchema map[string]any
-	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(readTool), &readSchema); err != nil {
-		t.Fatal(err)
-	}
-	readProperties, _ := readSchema["properties"].(map[string]any)
-	if readProperties["line_byte_offset"] == nil {
-		t.Fatalf("read schema missing line_byte_offset: %s", mcpresult.ToolSchemaJSON(readTool))
-	}
-	readItemsSchema, _ := readProperties["items"].(map[string]any)
-	readItemSchema, _ := readItemsSchema["items"].(map[string]any)
-	readItemProperties, _ := readItemSchema["properties"].(map[string]any)
-	if readItemProperties["line_byte_offset"] == nil {
-		t.Fatalf("read items schema missing line_byte_offset: %s", mcpresult.ToolSchemaJSON(readTool))
-	}
-
-	editTool := runtime.listedToolMap()["edit"]
-	if editTool.Annotations == nil || editTool.Annotations.ReadOnlyHint || editTool.Annotations.DestructiveHint == nil || *editTool.Annotations.DestructiveHint || !editTool.Annotations.IdempotentHint || editTool.Annotations.OpenWorldHint == nil || *editTool.Annotations.OpenWorldHint {
-		t.Fatalf("edit must expose constrained non-destructive workspace mutation: %+v", editTool.Annotations)
-	}
-	if editTool.Title != "Workspace 文件变更（不提供删除）" || editTool.Annotations.Title != editTool.Title {
-		t.Fatalf("edit title=%q annotations=%+v", editTool.Title, editTool.Annotations)
-	}
-	safety := toolSafetyMetadata(map[string]any{"_meta": editTool.Meta})
-	if safety == nil {
-		t.Fatalf("edit must expose mcpx/safety metadata: %+v", editTool.Meta)
-	}
-	if safety["scope"] != "registered_workspace_root" || safety["approval"] == "host_user_approval_required" {
-		t.Fatalf("edit safety metadata is incomplete: %+v", safety)
-	}
-	if !strings.Contains(editTool.Description, "不提供删除") || !strings.Contains(editTool.Description, "move_out") {
-		t.Fatalf("edit description must explain the removal boundary semantically: %s", editTool.Description)
-	}
-	var editSchema map[string]any
-	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(editTool), &editSchema); err != nil {
-		t.Fatal(err)
-	}
-	editProperties, _ := editSchema["properties"].(map[string]any)
-	if editProperties["remote_session_id"] == nil || editProperties["purpose"] == nil || editProperties["edits"] == nil {
-		t.Fatalf("edit schema missing clean-core fields: %s", mcpresult.ToolSchemaJSON(editTool))
-	}
-	editItems, _ := editProperties["edits"].(map[string]any)
-	itemSchema, _ := editItems["items"].(map[string]any)
-	itemProperties, _ := itemSchema["properties"].(map[string]any)
-	for _, field := range []string{"operation", "path", "rev", "content", "new_path", "replacements", "range"} {
-		if itemProperties[field] == nil {
-			t.Fatalf("edit item missing %q: %s", field, mcpresult.ToolSchemaJSON(editTool))
-		}
-	}
-	if itemProperties["base_sha256"] != nil {
-		t.Fatalf("edit item must not expose legacy base_sha256: %s", mcpresult.ToolSchemaJSON(editTool))
-	}
 	moveOutTool := runtime.listedToolMap()["move_out"]
 	if moveOutTool.Annotations == nil || moveOutTool.Annotations.ReadOnlyHint || moveOutTool.Annotations.DestructiveHint == nil || !*moveOutTool.Annotations.DestructiveHint || !moveOutTool.Annotations.IdempotentHint || moveOutTool.Annotations.OpenWorldHint == nil || *moveOutTool.Annotations.OpenWorldHint {
 		t.Fatalf("move_out annotations=%+v", moveOutTool.Annotations)
@@ -366,41 +287,52 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	observeProperties, _ := observeSchema["properties"].(map[string]any)
-	for _, field := range []string{"workspace", "view", "event_ids", "request_ids", "operation_ids", "plan_task_ids", "execution_task_ids", "plan_task_id", "execution_task_id", "edit_id", "offset", "keyword", "kinds", "statuses", "created_after", "created_before"} {
+	for _, field := range []string{"workspace", "view", "event_ids", "request_ids", "operation_ids", "plan_task_ids", "execution_task_ids", "plan_task_id", "execution_task_id", "stdout_offset", "stderr_offset", "cursor", "keyword", "kinds", "statuses", "created_after", "created_before"} {
 		if observeProperties[field] == nil {
 			t.Fatalf("observe history schema missing %q: %s", field, mcpresult.ToolSchemaJSON(observeTool))
 		}
 	}
-	for _, removed := range []string{"room_id", "task_id", "task_ids", "changeset_ids", "include_diff", "path"} {
+	for _, removed := range []string{"edit_id", "offset", "room_id", "task_id", "task_ids", "changeset_ids", "include_diff", "path"} {
 		if observeProperties[removed] != nil {
 			t.Fatalf("observe schema exposes removed field %q: %s", removed, mcpresult.ToolSchemaJSON(observeTool))
 		}
 	}
 	viewSchema, _ := observeProperties["view"].(map[string]any)
 	viewValues, _ := viewSchema["enum"].([]any)
-	for _, wantView := range []string{"session", "task", "plan", "history", "logs", "diff"} {
+	for _, wantView := range []string{"session", "task", "plan", "history", "logs"} {
 		if !containsSchemaRequired(viewValues, wantView) {
 			t.Fatalf("observe view enum missing %q: %v", wantView, viewValues)
 		}
 	}
-	for _, removedView := range []string{"changes"} {
+	for _, removedView := range []string{"diff", "changes"} {
 		if containsSchemaRequired(viewValues, removedView) {
 			t.Fatalf("observe view enum exposes removed view %q: %v", removedView, viewValues)
 		}
 	}
-	for _, toolName := range []string{"plan", "execute"} {
-		var schema map[string]any
-		if err := json.Unmarshal(mcpresult.ToolSchemaJSON(runtime.listedToolMap()[toolName]), &schema); err != nil {
-			t.Fatal(err)
-		}
-		properties, _ := schema["properties"].(map[string]any)
-		if toolName == "plan" && properties["plan_task_id"] == nil {
-			t.Fatalf("plan must expose plan_task_id: %s", mcpresult.ToolSchemaJSON(runtime.listedToolMap()[toolName]))
-		}
-		if toolName == "execute" && properties["execution_task_id"] == nil {
-			t.Fatalf("execute must expose execution_task_id: %s", mcpresult.ToolSchemaJSON(runtime.listedToolMap()[toolName]))
+	validateObserve := toolValidator(observeTool)
+	for _, invalid := range []map[string]any{
+		{"view": "diff"},
+		{"view": "history", "edit_id": "edit_removed"},
+		{"view": "history", "offset": 0},
+	} {
+		if err := validateObserve(mcpresult.Request(invalid)); err == nil {
+			t.Fatalf("observe accepted removed diff contract: %+v", invalid)
 		}
 	}
+	for _, valid := range []map[string]any{
+		{"view": "history", "cursor": "next", "limit": 10},
+		{"view": "logs", "execution_task_id": "task_1", "stdout_offset": 10, "stderr_offset": 20},
+	} {
+		if err := validateObserve(mcpresult.Request(valid)); err != nil {
+			t.Fatalf("observe rejected management continuation: %+v: %v", valid, err)
+		}
+	}
+
+	planSchema := decodedToolSchema(t, runtime.listedToolMap()["plan"])
+	if planSchema["properties"].(map[string]any)["plan_task_id"] == nil {
+		t.Fatal("plan must expose plan_task_id")
+	}
+
 	operationManage := runtime.listedToolMap()["operation_manage"]
 	var operationSchema map[string]any
 	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(operationManage), &operationSchema); err != nil {
@@ -434,6 +366,67 @@ func TestPublicCatalogIsExactlyTheCleanCoreContract(t *testing.T) {
 	opRequired, _ := operationSchema["required"].([]any)
 	if !reflect.DeepEqual(opRequired, []any{"action"}) {
 		t.Fatalf("operation_manage required must be exactly [action], got %v", opRequired)
+	}
+}
+
+func TestProgrammingInputContract(t *testing.T) {
+	runtime := &Runtime{}
+	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
+	runtime.registerTools(protocol)
+	contracts := []struct {
+		name     string
+		required string
+		fields   map[string]string
+		valid    map[string]any
+	}{
+		{"exec_command", "cmd", map[string]string{
+			"cmd": "string", "workdir": "string", "shell": "string", "login": "boolean", "tty": "boolean",
+			"yield_time_ms": "number", "max_output_tokens": "number", "remote_session_id": "string",
+		}, map[string]any{"cmd": "rg --files", "shell": "/bin/sh", "login": false, "tty": true}},
+		{"write_stdin", "session_id", map[string]string{
+			"session_id": "integer", "chars": "string", "yield_time_ms": "number", "max_output_tokens": "number", "remote_session_id": "string",
+		}, map[string]any{"session_id": 42, "chars": "hello\n", "remote_session_id": "rs_demo"}},
+		{"apply_patch", "input", map[string]string{
+			"input": "string", "remote_session_id": "string",
+		}, map[string]any{"input": "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch"}},
+	}
+	for _, contract := range contracts {
+		t.Run(contract.name, func(t *testing.T) {
+			tool := runtime.listedToolMap()[contract.name]
+			schema := decodedToolSchema(t, tool)
+			props := schema["properties"].(map[string]any)
+			if len(props) != len(contract.fields) || !reflect.DeepEqual(requiredFields(schema), []string{contract.required}) {
+				t.Fatalf("unexpected fields or required arguments: %+v", schema)
+			}
+			for name, typ := range contract.fields {
+				field, _ := props[name].(map[string]any)
+				description, _ := field["description"].(string)
+				if field["type"] != typ || strings.TrimSpace(description) == "" {
+					t.Fatalf("%s.%s contract: %+v", contract.name, name, field)
+				}
+			}
+			validate := toolValidator(tool)
+			if err := validate(mcpresult.Request(contract.valid)); err != nil {
+				t.Fatalf("valid arguments rejected: %v", err)
+			}
+			if err := validate(mcpresult.Request(map[string]any{})); err == nil {
+				t.Fatal("missing required argument accepted")
+			}
+			for _, extra := range []string{"purpose", "user_confirmed", "sandbox_permissions", "action", "idempotency_key", "execution_mode", "rev", "activity", "acknowledge_requests"} {
+				args := map[string]any{contract.required: contract.valid[contract.required], extra: "unused"}
+				if err := validate(mcpresult.Request(args)); err == nil {
+					t.Fatalf("unsupported parameter %q accepted", extra)
+				}
+			}
+			if tool.Annotations == nil || tool.Annotations.ReadOnlyHint || tool.Annotations.IdempotentHint {
+				t.Fatalf("programming tools must expose possible effects and fresh execution: %+v", tool.Annotations)
+			}
+		})
+	}
+	for _, invalid := range []any{"rs_demo", 1.5} {
+		if err := toolValidator(runtime.listedToolMap()["write_stdin"])(mcpresult.Request(map[string]any{"session_id": invalid})); err == nil {
+			t.Fatalf("invalid process handle accepted: %v", invalid)
+		}
 	}
 }
 

@@ -14,10 +14,8 @@ import (
 
 	"mcpx/internal/mcpresult"
 
-	"mcpx/internal/envelope"
 	"mcpx/internal/observation"
 	"mcpx/internal/remotesession"
-	"mcpx/internal/security"
 )
 
 func TestObservationRecordsToolLifecycleAndRedacts(t *testing.T) {
@@ -163,7 +161,7 @@ func TestObservationPersistsRequestAddressableToolResult(t *testing.T) {
 func TestWorkspaceHistoryReadReturnsPersistedToolResult(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	if err := rt.observation.store.SaveToolResult(context.Background(), observation.PersistedToolResult{
-		RequestID: "req_recover", Workspace: "demo", RemoteSessionID: "", Tool: "read", Status: "succeeded",
+		RequestID: "req_recover", Workspace: "demo", RemoteSessionID: "", Tool: "artifact", Status: "succeeded",
 		Result: json.RawMessage(`{"content":[{"type":"text","text":"recovered"}],"isError":false}`), Summary: "recovered",
 	}); err != nil {
 		t.Fatal(err)
@@ -184,7 +182,7 @@ func TestWorkspaceHistoryReadReturnsPersistedToolResult(t *testing.T) {
 		t.Fatalf("history results=%+v", data["results"])
 	}
 	item, ok := items[0].(map[string]any)
-	if !ok || item["request_id"] != "req_recover" || item["tool"] != "read" {
+	if !ok || item["request_id"] != "req_recover" || item["tool"] != "artifact" {
 		t.Fatalf("recovered result=%+v", items[0])
 	}
 	recovered, ok := item["result"].(map[string]any)
@@ -228,57 +226,6 @@ func TestObservationAggregatesRemoteSessionLifecycleByWorkspace(t *testing.T) {
 	}
 }
 
-func TestObservationRecordsCleanEditWithFileDiff(t *testing.T) {
-	rt := newWorkspaceRuntime(t, "demo")
-	principal, err := rt.principalFromContext(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	registered, ok := rt.reg.Get("demo")
-	if !ok {
-		t.Fatal("workspace was not registered")
-	}
-	created, err := rt.remote.Create(context.Background(), principal, remotesession.CreateInput{
-		WorkspaceName: "demo", WorkspacePath: registered.Path,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	intent := "apply the observed file change"
-	edited := callEnvelope(t, rt.toolEdit, context.Background(), map[string]any{
-		"intent": intent, "remote_session_id": created.Session.ID, "purpose": intent,
-		"edits": []any{map[string]any{"operation": "create", "path": "observed.txt", "content": "visible change\n"}},
-	})
-	if !statusOK(edited) {
-		t.Fatalf("edit failed: %+v", edited)
-	}
-	editID, _ := edited["data"].(map[string]any)["edit_id"].(string)
-	if editID == "" {
-		t.Fatalf("edit id missing: %+v", edited)
-	}
-	events, err := rt.observation.store.History(context.Background(), "demo", 0, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var changed *observationEventView
-	for _, event := range events {
-		if event.Type != observation.TypeFileChanged || event.Tool != "edit" {
-			continue
-		}
-		if !strings.Contains(string(event.Output), editID) {
-			continue
-		}
-		view := observationEventView{Intent: event.Intent, Output: string(event.Output)}
-		changed = &view
-	}
-	if changed == nil || changed.Intent != intent {
-		t.Fatalf("file change event missing: %+v", changed)
-	}
-	if !strings.Contains(changed.Output, "observed.txt") || !strings.Contains(changed.Output, "+visible change") {
-		t.Fatalf("file change event lacks concrete diff: %s", changed.Output)
-	}
-}
-
 func TestObservationRecordsRuntimeTaskOutput(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
 	principal, err := rt.principalFromContext(context.Background())
@@ -296,7 +243,7 @@ func TestObservationRecordsRuntimeTaskOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	const requestID = "req_runtime_output"
-	const tool = "command_execute"
+	const tool = "managed_task_fixture"
 	command := testStdoutStderrCommand("runtime-out token=do-not-store-this-token", "runtime-err password=do-not-store-this-password")
 	task, err := rt.tasks.StartRemoteWithObservation(context.Background(), requestID, tool, created.Session.ID, "demo", registered.Path, command)
 	if err != nil {
@@ -382,23 +329,16 @@ func TestObservationRecordsCommandTaskRequestIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	envReq := envelope.Request{
-		RequestID:       "req_command_observed",
-		Intent:          "observe command output",
-		RemoteSessionID: created.Session.ID,
-		Workspace:       "demo",
-		Payload:         map[string]any{},
-	}
-	// echo is a shell builtin on both cmd.exe and POSIX shells. This direct
-	// executeCommandTask test bypasses policy confirmation, so no wrapper is
-	// needed and the observed output is identical across platforms.
-	command := "echo command-out"
-	analysis := security.CommandAnalysis{
-		Decision: security.Allow,
-		Segments: []security.CommandSegmentDecision{{Command: command, Decision: security.Allow}},
-	}
-	if _, err := rt.executeCommandTask(context.Background(), envReq, principal, created.Session, command, time.Second, "test", "workspace", "sha256:test", analysis); err != nil {
+	const requestID = "req_command_identity"
+	const toolName = "managed_task_fixture"
+	task, err := rt.tasks.StartRemoteWithObservation(context.Background(), requestID, toolName, created.Session.ID, "demo", registered.Path, "echo command-out")
+	if err != nil {
 		t.Fatal(err)
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if !task.Wait(waitCtx) {
+		t.Fatal("managed task did not exit")
 	}
 
 	found := false
@@ -420,8 +360,8 @@ func TestObservationRecordsCommandTaskRequestIdentity(t *testing.T) {
 				continue
 			}
 			found = true
-			if event.RequestID != envReq.RequestID || event.Tool != "command_execute" {
-				t.Fatalf("command output identity=%+v, want request=%q tool=%q", event, envReq.RequestID, "command_execute")
+			if event.RequestID != requestID || event.Tool != toolName {
+				t.Fatalf("command output identity=%+v, want request=%q tool=%q", event, requestID, toolName)
 			}
 		}
 		if !found {

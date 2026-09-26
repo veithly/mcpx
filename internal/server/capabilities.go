@@ -12,9 +12,17 @@ import (
 	"mcpx/internal/remotesession"
 )
 
-const cleanCoreCapabilityVersion = "clean-core-p13"
+const cleanCoreCapabilityVersion = "native-toolchain-v1"
 
 const clientProtocolVersion = "2"
+
+func programmingImplementation() map[string]any {
+	return map[string]any{
+		"executor": "mcpx/native-unifiedexec", "patch_engine": "mcpx/native-apply-patch",
+		"reference_project": "openai/codex", "reference_commit": "68e0c9f5d8fd9449e97a81e92e8fcb86795713b2",
+		"external_codex_required": false,
+	}
+}
 
 func clientProtocolCapabilities() map[string]any {
 	fields := append([]string(nil), agentActivityKindNames...)
@@ -51,8 +59,8 @@ func clientProtocolRevision() string { return hashRevision(clientProtocolCapabil
 
 func capabilityGroups() map[string][]string {
 	return map[string][]string{
-		"core":    {"workspace", "session", "read", "edit", "move_out", "observe", "progress", "execute", "plan", "artifact", "skill_tool", "mcp_tool"},
-		"support": {"operation_batch", "operation_manage", "runtime_read", "environment_read", "environment", "browser", "screenshot_capture", "secret_provide"},
+		"programming": {"exec_command", "write_stdin", "apply_patch"},
+		"management":  {"workspace", "session", "move_out", "observe", "progress", "plan", "artifact", "skill_tool", "mcp_tool", "operation_batch", "operation_manage", "runtime_read", "environment_read", "environment", "browser", "screenshot_capture", "secret_provide"},
 	}
 }
 
@@ -74,16 +82,16 @@ var toolCapabilityDefinitions = []toolCapabilityDefinition{
 	{Name: "operation_manage", Domain: "operation", RequiresRemoteSession: true},
 	{Name: "workspace", Domain: "workspace"},
 	{Name: "session", Domain: "session"},
-	{Name: "read", Domain: "source", RequiresRemoteSession: true},
-	{Name: "edit", Domain: "edit", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
+	{Name: "exec_command", Domain: "programming", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "terminal"},
+	{Name: "write_stdin", Domain: "programming", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "terminal"},
+	{Name: "apply_patch", Domain: "programming", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "move_out", Domain: "workspace_move_out", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
-	{Name: "execute", Domain: "command", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "terminal"},
 	{Name: "plan", Domain: "plan", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "artifact", Domain: "artifact", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
 	{Name: "skill_tool", Domain: "extension", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "skills"},
 	{Name: "mcp_tool", Domain: "extension", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}, Feature: "mcp"},
-	// Support tools intentionally remain outside the core workflow but share
-	// the same remote_session_id contract; their definitions are listed above.
+	// Gateway management tools share Remote Session routing, but do not
+	// implement the Codex programming toolchain.
 	{Name: "runtime_read", Domain: "runtime"},
 	{Name: "environment_read", Domain: "environment"},
 	{Name: "environment", Domain: "environment", RequiresRemoteSession: true, Roles: []string{"owner", "editor"}},
@@ -95,7 +103,7 @@ var toolCapabilityDefinitions = []toolCapabilityDefinition{
 func toolSupportsEmbeddedActivity(name string) bool {
 	for _, definition := range toolCapabilityDefinitions {
 		if definition.Name == name {
-			return definition.RequiresRemoteSession
+			return definition.RequiresRemoteSession && definition.Domain != "programming"
 		}
 	}
 	return false
@@ -124,7 +132,7 @@ func machineToolCapabilities(effective config.Config, session *remotesession.Ses
 			}
 		}
 		if state == "available" && definition.RequiresRemoteSession && session == nil {
-			state, reason = "requires_remote_session", "session_id_required"
+			state, reason = "requires_remote_session", "remote_session_required"
 		}
 		if state == "available" && session != nil && len(definition.Roles) > 0 && !containsString(definition.Roles, session.Role) {
 			state, reason = "forbidden", "role_not_allowed"

@@ -42,6 +42,7 @@ import (
 	"mcpx/internal/skill"
 	"mcpx/internal/state"
 	"mcpx/internal/terminal"
+	"mcpx/internal/unifiedexec"
 	buildversion "mcpx/internal/version"
 	"mcpx/internal/workspace"
 	"mcpx/internal/workspacechanges"
@@ -93,6 +94,9 @@ type Runtime struct {
 	sessionBindings   map[string]string
 	closeOnce         sync.Once
 	closeErr          error
+	processMu         sync.Mutex
+	processLifecycle  sync.RWMutex
+	processClients    map[string]*unifiedexec.Client
 
 	// For schema revision and capability catalog.
 	toolIndex          map[string]mcp.Tool
@@ -527,6 +531,7 @@ func (r *Runtime) Close() error {
 		return nil
 	}
 	r.closeOnce.Do(func() {
+		r.closeProcessClients()
 		r.stopRetention()
 		if r.observation != nil && r.observation.async != nil {
 			// 0 selects the recorder's default drain floor (5s): a full queue
@@ -1054,13 +1059,14 @@ func (r *Runtime) toolCapabilityList(ctx context.Context, req *mcp.CallToolReque
 		"workspace":          map[string]any{"name": ws.Name},
 		"tools":              tools,
 		"runtime": map[string]any{
-			"version":                  r.build.Version,
-			"build_commit":             r.build.Commit,
-			"build_time":               r.build.Date,
-			"tool_schema_revision":     toolSchemaRevision,
-			"client_protocol_revision": clientProtocolRevision(),
-			"capability_version":       cleanCoreCapabilityVersion,
-			"capability_groups":        capabilityGroups(),
+			"programming_implementation": programmingImplementation(),
+			"version":                    r.build.Version,
+			"build_commit":               r.build.Commit,
+			"build_time":                 r.build.Date,
+			"tool_schema_revision":       toolSchemaRevision,
+			"client_protocol_revision":   clientProtocolRevision(),
+			"capability_version":         cleanCoreCapabilityVersion,
+			"capability_groups":          capabilityGroups(),
 		},
 		"instructions": map[string]any{
 			"order": []string{"global", "project", "directory"}, "documents": r.agentInstructions(wsPath),

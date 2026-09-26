@@ -2,9 +2,10 @@ package server
 
 import (
 	"context"
-	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -56,28 +57,26 @@ func TestStreamableHTTPReconnectRestoresRemoteSession(t *testing.T) {
 	if remoteID == "" {
 		t.Fatal("未返回持久 Remote Session ID")
 	}
-	editArgs := map[string]any{
-		"remote_session_id": remoteID, "purpose": "准备精确字节恢复 fixture", "idempotency_key": "issue823-persisted-edit",
-		"edits": []any{map[string]any{
-			"path": "proof.txt", "operation": "create", "newline_policy": "exact",
-			"content_base64":  base64.StdEncoding.EncodeToString([]byte("恢复前后的同一文件\r\n")),
-			"expected_format": map[string]any{"charset": "utf-8", "bom": "none", "line_ending": "CRLF"},
-		}},
+	if err := os.WriteFile(filepath.Join(registered.Path, "proof.txt"), []byte("恢复前后的同一文件\r\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	created := call(first, "edit", editArgs)
-	if !statusOK(created) {
-		t.Fatal("公共精确字节编辑失败")
+	artifactArgs := map[string]any{
+		"action": "register", "remote_session_id": remoteID, "purpose": "登记重连验证产物",
+		"idempotency_key": "reconnect-artifact", "path": "proof.txt", "kind": "other",
 	}
-	readArgs := map[string]any{"view": "file", "remote_session_id": remoteID, "path": "proof.txt"}
-	before := call(first, "read", readArgs)
-	beforeData, _ := before["data"].(map[string]any)
-	if beforeData["rev"] == nil || beforeData["sha256"] != nil {
-		t.Fatal("缺少 compact rev 或泄漏完整 SHA")
+	created := call(first, "artifact", artifactArgs)
+	artifactID := created["data"].(map[string]any)["artifact_id"].(string)
+	readArgs := map[string]any{"action": "read", "remote_session_id": remoteID, "artifact_id": artifactID}
+	before := call(first, "artifact", readArgs)
+	beforeData := before["data"].(map[string]any)
+	if beforeData["text"] != "恢复前后的同一文件\r\n" {
+		t.Fatal("产物未返回内容")
 	}
+
 	batchArgs := map[string]any{
 		"remote_session_id": remoteID, "purpose": "核对恢复前后同一读取操作",
 		"run_id": "reconnect-run", "operation_id": "reconnect-operation",
-		"operations": []any{map[string]any{"id": "read-proof", "tool": "read", "arguments": readArgs}},
+		"operations": []any{map[string]any{"id": "read-proof", "tool": "artifact", "arguments": readArgs}},
 	}
 	call(first, "operation_batch", batchArgs)
 	waitArgs := map[string]any{"remote_session_id": remoteID, "operation_id": "reconnect-operation", "action": "wait", "timeout_ms": 5000}
@@ -89,7 +88,7 @@ func TestStreamableHTTPReconnectRestoresRemoteSession(t *testing.T) {
 	}
 	offline.Store(true)
 	failedCtx, failedCancel := context.WithTimeout(ctx, 2*time.Second)
-	_, err := first.CallTool(failedCtx, &mcp.CallToolParams{Name: "read", Arguments: readArgs})
+	_, err := first.CallTool(failedCtx, &mcp.CallToolParams{Name: "artifact", Arguments: readArgs})
 	failedCancel()
 	if err == nil {
 		t.Fatal("故障窗口的请求意外成功")
@@ -117,15 +116,15 @@ func TestStreamableHTTPReconnectRestoresRemoteSession(t *testing.T) {
 	if resumed["remote_session_id"] != remoteID {
 		t.Fatal("恢复创建了不同的 Remote Session")
 	}
-	replayed := call(second, "edit", editArgs)
+	replayed := call(second, "artifact", artifactArgs)
 	replayedData, _ := replayed["data"].(map[string]any)
 	if !statusOK(replayed) || replayedData["idempotent_replay"] != true {
-		t.Fatal("重启后没有复用精确编辑回执")
+		t.Fatal("重启后没有复用产物登记回执")
 	}
-	after := call(second, "read", readArgs)
+	after := call(second, "artifact", readArgs)
 	afterData, _ := after["data"].(map[string]any)
-	if afterData["rev"] != beforeData["rev"] || afterData["content"] != beforeData["content"] {
-		t.Fatal("重连后文件身份或内容改变")
+	if afterData["text"] != beforeData["text"] || afterData["sha256"] != beforeData["sha256"] {
+		t.Fatal("重连后产物内容改变")
 	}
 	// 使用同一稳定提交身份恢复，不因 HTTP/Runtime 重启生成新操作。
 	batchReplay := call(second, "operation_batch", batchArgs)

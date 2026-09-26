@@ -53,6 +53,9 @@ func (r *Runtime) toolOperationBatch(ctx context.Context, req *mcp.CallToolReque
 		arguments, _ := item["arguments"].(map[string]any)
 		stepID = strings.TrimSpace(stepID)
 		toolName = strings.TrimSpace(toolName)
+		if isProgrammingTool(toolName) {
+			return r.terminalError(envReq, session.ID, session.WorkspaceName, "INVALID_ARGUMENTS", "Codex programming tools are called directly; use their returned session_id with write_stdin, not an outer Operation")
+		}
 		if stepID == "" || toolName == "" || arguments == nil {
 			return r.terminalError(envReq, session.ID, session.WorkspaceName, "bad_request", fmt.Sprintf("operations[%d] requires id, tool and arguments", index))
 		}
@@ -575,6 +578,7 @@ func operationResultView(page operation.ResultPage) map[string]any {
 			"operation_id":      page.Operation.ID,
 			"action":            "result",
 			"cursor":            page.NextCursor,
+			"limit":             page.Limit,
 		}
 		if page.StepID != "" {
 			arguments["step_id"] = page.StepID

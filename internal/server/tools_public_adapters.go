@@ -244,22 +244,6 @@ func parseUnixMillis(value string) (int64, error) {
 	return parsed, nil
 }
 
-func (r *Runtime) toolSourceRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	view := publicSelector(req, "view")
-	if view == "file" {
-		return r.toolFileReadUnified(ctx, req)
-	}
-	action := view
-	if action == "context" {
-		action = "query"
-	}
-	updates := map[string]any{"action": action}
-	if mode, ok := mcpresult.Arguments(req)["search_mode"]; ok {
-		updates["mode"] = mode
-	}
-	return r.toolContextQueryUnified(ctx, forwardedRequest(req, updates))
-}
-
 func (r *Runtime) toolRuntimeRead(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	req, view := canonicalRuntimeReadRequest(req)
 	return r.toolRuntimeInspect(ctx, publicDispatch(req, "action", view))

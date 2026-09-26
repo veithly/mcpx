@@ -2,12 +2,13 @@ package workspacechanges
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"mcpx/internal/auth"
 	"mcpx/internal/remotesession"
@@ -45,14 +46,10 @@ func TestInspectAttributesRemoteSessionChanges(t *testing.T) {
 	}
 
 	write(t, root, "mcpx.txt", "changed by mcpx\n")
-	now := time.Now().UTC().UnixMilli()
-	if _, err := store.DB().ExecContext(ctx, `INSERT INTO clean_edit_records
-		(id, remote_session_id, principal_id, state, result_json, created_at, updated_at, expires_at)
-		VALUES (?, ?, ?, 'succeeded', ?, ?, ?, ?)`,
-		"edit-test", created.Session.ID, principal.ID, `{"results":[{"path":"mcpx.txt"}]}`,
-		now, now, now+int64(time.Hour/time.Millisecond)); err != nil {
-		t.Fatal(err)
-	}
+	seedPatchReceipt(t, store.DB(), created.Session.ID, "apply_patch", "succeeded", 0, "patch-test", map[string]any{
+		"_meta":             map[string]any{"mcpx/request_id": "patch-test", "mcpx/patch_paths": []string{"mcpx.txt"}},
+		"structuredContent": map[string]any{"output": "Success", "exit_code": 0},
+	})
 	write(t, root, "external.txt", "outside edit\n")
 
 	report, err := service.Inspect(ctx, created.Session.ID, "test", root, true)
@@ -66,7 +63,7 @@ func TestInspectAttributesRemoteSessionChanges(t *testing.T) {
 	for path, want := range map[string]string{
 		"preexisting.txt": "preexisting",
 		"mcpx.txt":        "mcpx",
-		"external.txt":    "external",
+		"external.txt":    "unknown",
 	} {
 		if got := attribution[path]; got != want {
 			t.Fatalf("%s attribution=%q, want %q; report=%+v", path, got, want, report.Entries)
@@ -143,8 +140,8 @@ func TestInspectHandlesGitRepositoryCreatedAfterSessionOpen(t *testing.T) {
 	if report.BaselineHead == "" {
 		t.Fatalf("fallback baseline head is missing: %+v", report)
 	}
-	if len(report.Entries) != 1 || report.Entries[0].Attribution != "external" {
-		t.Fatalf("late Git change attribution=%+v, want one external entry", report.Entries)
+	if len(report.Entries) != 1 || report.Entries[0].Attribution != "unknown" {
+		t.Fatalf("late Git change attribution=%+v, want one unknown entry", report.Entries)
 	}
 }
 
@@ -229,5 +226,80 @@ func write(t *testing.T, root, name, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func seedPatchReceipt(t *testing.T, db *sql.DB, sessionID, tool, status string, exitCode any, requestID string, result any) {
+	t.Helper()
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO tool_results (request_id, workspace_name, remote_session_id, tool_name, status, exit_code, result_json, created_at, updated_at)
+		VALUES (?, 'test', ?, ?, ?, ?, ?, 1, 1)`, requestID, sessionID, tool, status, exitCode, string(raw)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPatchAttributionRequiresCompleteSessionReceipt(t *testing.T) {
+	for _, name := range []string{"valid-move", "other-session", "failed", "running", "nonzero", "missing-code", "wrong-tool", "missing-paths", "wrong-request", "error-result", "truncated", "malformed", "unsafe-paths"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("CODEX_HOME", t.TempDir())
+			store, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			session, tool, status := "rs_test", "apply_patch", "succeeded"
+			var code any = 0
+			meta := map[string]any{"mcpx/request_id": "patch", "mcpx/patch_paths": []string{"old.txt", "new.txt"}}
+			content := map[string]any{"output": "Success", "exit_code": 0}
+			result := map[string]any{"_meta": meta, "structuredContent": content}
+			switch name {
+			case "other-session":
+				session = "rs_other"
+			case "failed":
+				status = "failed"
+			case "running":
+				status, code = "accepted", nil
+			case "nonzero":
+				code = 1
+				content["exit_code"] = 1
+			case "missing-code":
+				delete(content, "exit_code")
+			case "wrong-tool":
+				tool = "exec_command"
+			case "missing-paths":
+				delete(meta, "mcpx/patch_paths")
+			case "wrong-request":
+				meta["mcpx/request_id"] = "different-request"
+			case "error-result":
+				result["isError"] = true
+			case "unsafe-paths":
+				meta["mcpx/patch_paths"] = []string{"../outside", "/tmp/outside", ".", ""}
+			}
+			seedPatchReceipt(t, store.DB(), session, tool, status, code, "patch", result)
+			if name == "truncated" {
+				if _, err := store.DB().Exec("UPDATE tool_results SET truncated = 1"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if name == "malformed" {
+				if _, err := store.DB().Exec("UPDATE tool_results SET result_json = '{'"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			paths, err := NewService(store.DB()).mcpxPaths(context.Background(), "rs_test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if name == "valid-move" {
+				if len(paths) != 2 || !paths["old.txt"] || !paths["new.txt"] {
+					t.Fatalf("move receipt lost: %+v", paths)
+				}
+			} else if len(paths) != 0 {
+				t.Fatalf("unproven attribution: %+v", paths)
+			}
+		})
 	}
 }

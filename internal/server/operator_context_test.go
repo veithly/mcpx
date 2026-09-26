@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,15 +109,15 @@ func TestFullAccessExecutesWithoutConfirmationButPreservesDeny(t *testing.T) {
 	if err := rt.control.SetMode(ctx, "alpha", control.FullAccess); err != nil {
 		t.Fatal(err)
 	}
-	result := callEnvelope(t, rt.toolExecute, ctx, map[string]any{"remote_session_id": sid, "action": "run", "command": "echo console-full-access", "purpose": "verify full access", "yield_time_ms": 1000})
+	result := callEnvelope(t, rt.toolExecCommand, ctx, map[string]any{"remote_session_id": sid, "cmd": "echo console-full-access", "yield_time_ms": 1000})
 	if result["status"] == "waiting_confirmation" || errorCode(result) != "" {
 		t.Fatalf("permitted full access failed: %+v", result)
 	}
 	if len(rt.approvals.ListRemoteSession(sid)) != 0 {
 		t.Fatal("full access generated unnecessary approval")
 	}
-	denied := callEnvelope(t, rt.toolExecute, ctx, map[string]any{"remote_session_id": sid, "action": "run", "command": "echo explicitly-denied", "purpose": "verify deny boundary"})
-	if errorCode(denied) != "denied" {
+	denied := callEnvelope(t, rt.toolExecCommand, ctx, map[string]any{"remote_session_id": sid, "cmd": "echo explicitly-denied"})
+	if !strings.Contains(fmt.Sprint(denied), "COMMAND_DENIED") {
 		t.Fatalf("explicit deny bypassed: %+v", denied)
 	}
 }
@@ -126,9 +127,9 @@ func TestFullAccessDoesNotUndoOperatorRejection(t *testing.T) {
 	ctx := context.Background()
 	sid := consoleRemote(t, rt, "alpha")
 	rt.cfg.Security.Commands.Confirm = []string{"echo *"}
-	args := map[string]any{"remote_session_id": sid, "action": "run", "command": "echo rejected-command", "purpose": "verify exact operator rejection"}
-	first := callEnvelope(t, rt.toolExecute, ctx, args)
-	if first["status"] != "waiting_confirmation" {
+	args := map[string]any{"remote_session_id": sid, "cmd": "echo rejected-command"}
+	first := callEnvelope(t, rt.toolExecCommand, ctx, args)
+	if !strings.Contains(fmt.Sprint(first), "APPROVAL_REQUIRED") {
 		t.Fatalf("expected pending: %+v", first)
 	}
 	pending := rt.approvals.ListRemoteSession(sid)
@@ -141,8 +142,8 @@ func TestFullAccessDoesNotUndoOperatorRejection(t *testing.T) {
 	if err := rt.control.SetMode(ctx, "alpha", control.FullAccess); err != nil {
 		t.Fatal(err)
 	}
-	result := callEnvelope(t, rt.toolExecute, ctx, args)
-	if errorCode(result) != "denied" {
+	result := callEnvelope(t, rt.toolExecCommand, ctx, args)
+	if !strings.Contains(fmt.Sprint(result), "COMMAND_DENIED") {
 		t.Fatalf("operator rejection overridden: %+v", result)
 	}
 }

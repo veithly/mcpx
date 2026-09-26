@@ -32,7 +32,7 @@ func TestAgentGuidanceIsCompactPrincipledContract(t *testing.T) {
 	default:
 		t.Fatalf("tool routing type=%T", routingIface)
 	}
-	if !containsAnyString(routing["inspect_source"], "read") || !containsAnyString(routing["inspect_environment"], "environment_read") || !containsAnyString(routing["modify_files"], "edit") {
+	if !containsAnyString(routing["inspect_source"], "exec_command") || !containsAnyString(routing["inspect_environment"], "environment_read") || !containsAnyString(routing["modify_files"], "apply_patch") || !containsAnyString(routing["inspect_changes"], "exec_command") {
 		t.Fatalf("canonical routing=%+v", routing)
 	}
 	rules, ok := guidance["rules"].([]string)
@@ -40,12 +40,12 @@ func TestAgentGuidanceIsCompactPrincipledContract(t *testing.T) {
 		t.Fatalf("guidance should stay compact: %T %+v", guidance["rules"], guidance["rules"])
 	}
 	joined := strings.Join(rules, "\n")
-	for _, required := range []string{"structuredContent", "不要猜测", "canonical tool", "STALE_REVISION", "recovery", "move_out", "purpose", "activity", "必须携带 activity.intent", "activity.evidence", "activity.next", "progress", "最终回复前", "最小充分证据"} {
+	for _, required := range []string{"structuredContent", "不要猜测", "exec_command", "write_stdin", "apply_patch", "session_id", "remote_session_id", "output", "exit_code", "console", "git diff", "最小充分证据", "最终回复前"} {
 		if !strings.Contains(joined, required) {
 			t.Errorf("compact guidance missing principle %q: %s", required, joined)
 		}
 	}
-	for _, forbidden := range []string{"progress_summary", "reasoning_summary", "准备停止 MCPX 工具调用", "用户可见响应契约", "edit 参数速查"} {
+	for _, forbidden := range []string{"progress_summary", "reasoning_summary", "STALE_REVISION", "必须携带 activity.intent", "edit 参数速查", "用 read", "用 execute"} {
 		if strings.Contains(joined, forbidden) {
 			t.Errorf("guidance still contains protocol bookkeeping %q: %s", forbidden, joined)
 		}
@@ -106,82 +106,25 @@ func TestEveryPublicToolHasModelFacingDescriptionAndActionBranches(t *testing.T)
 
 func TestRecoveryActionIsStructuredInErrorDetails(t *testing.T) {
 	response := envelope.Fail(envelope.StatusError, "req_test", "demo", nil, "NOT_FOUND", "missing")
-	addRecoveryAction(&response, "context_query", "locate the missing file", map[string]any{"action": "list"})
+	addRecoveryAction(&response, "exec_command", "locate the missing file", map[string]any{"cmd": "rg --files"})
 	if response.Error == nil {
 		t.Fatal("missing error body")
 	}
 	next, ok := response.Error.Details["next_action"].(map[string]any)
-	if !ok || next["tool"] != "read" || next["reason"] != "locate the missing file" {
+	if !ok || next["tool"] != "exec_command" || next["reason"] != "locate the missing file" {
 		t.Fatalf("next action=%+v", response.Error.Details["next_action"])
 	}
-	if response.Error.Recovery == nil || response.Error.Recovery.Tool != "read" || response.Error.Recovery.Arguments["view"] != "list" {
+	if response.Error.Recovery == nil || response.Error.Recovery.Tool != "exec_command" || response.Error.Recovery.Arguments["cmd"] != "rg --files" {
 		t.Fatalf("structured recovery=%+v", response.Error.Recovery)
 	}
 }
 
-func TestLegacyTaskStatusRecoveryNormalizesToObserveTask(t *testing.T) {
-	tool, args := normalizePublicAction("task_manage", map[string]any{
-		"action": "status", "remote_session_id": "rs_1", "execution_task_id": "task_1",
+func TestPublicActionPreservesProcessAndRemoteSessionIDs(t *testing.T) {
+	tool, args := normalizePublicAction("write_stdin", map[string]any{
+		"session_id": 42, "remote_session_id": "rs_1", "chars": "hello\n",
 	})
-	if tool != "observe" || args["view"] != "task" || args["execution_task_id"] != "task_1" {
-		t.Fatalf("normalized recovery=%s %+v", tool, args)
-	}
-}
-
-func TestCleanProjectTaskNotFoundRecoveryUsesRuntimeProject(t *testing.T) {
-	rt := newWorkspaceRuntime(t, "demo")
-	result, err := rt.terminalErrorWithCleanMode(envelope.Request{RequestID: "req_task_missing"}, "rs_1", "demo", "task_not_found", "project task missing not found", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response := decodeToolResult(t, result)
-	errorBody, _ := response["error"].(map[string]any)
-	details, _ := errorBody["details"].(map[string]any)
-	next, _ := details["next_action"].(map[string]any)
-	assertSuggestedActionFitsPublicSchema(t, rt, next)
-	args, _ := next["arguments"].(map[string]any)
-	if next["tool"] != "runtime_read" || args["view"] != "project" || args["remote_session_id"] != "rs_1" {
-		t.Fatalf("project task recovery=%+v", next)
-	}
-}
-
-func TestEditSchemaIsSelfDescribingAndFlat(t *testing.T) {
-	runtime := &Runtime{}
-	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
-	runtime.registerTools(protocol)
-	registered := runtime.listedToolMap()["edit"]
-	if len(mcpresult.ToolSchemaJSON(registered)) == 0 {
-		t.Fatal("edit must expose a raw schema")
-	}
-	var schema map[string]any
-	if err := json.Unmarshal(mcpresult.ToolSchemaJSON(registered), &schema); err != nil {
-		t.Fatal(err)
-	}
-	if _, hasOneOf := schema["oneOf"]; hasOneOf {
-		t.Fatalf("edit schema must not rely on top-level oneOf: %s", mcpresult.ToolSchemaJSON(registered))
-	}
-	if schema["additionalProperties"] != false {
-		t.Fatalf("edit must reject unknown fields: %s", mcpresult.ToolSchemaJSON(registered))
-	}
-	properties, ok := schema["properties"].(map[string]any)
-	if !ok || properties["remote_session_id"] == nil || properties["purpose"] == nil || properties["idempotency_key"] == nil {
-		t.Fatalf("edit semantic fields are invalid: %+v", properties)
-	}
-	edits := properties["edits"].(map[string]any)
-	items := edits["items"].(map[string]any)
-	itemProperties := items["properties"].(map[string]any)
-	for _, field := range []string{"operation", "path", "rev", "content", "new_path", "replacements"} {
-		fieldSchema, ok := itemProperties[field].(map[string]any)
-		if !ok || strings.TrimSpace(fieldSchema["description"].(string)) == "" {
-			t.Fatalf("edit item field %q is not self describing", field)
-		}
-	}
-	replacementItems := itemProperties["replacements"].(map[string]any)["items"].(map[string]any)
-	for _, field := range []string{"match", "replacement"} {
-		fieldSchema := replacementItems["properties"].(map[string]any)[field].(map[string]any)
-		if strings.TrimSpace(fieldSchema["description"].(string)) == "" {
-			t.Fatalf("replacement field %q has no description", field)
-		}
+	if tool != "write_stdin" || args["session_id"] != 42 || args["remote_session_id"] != "rs_1" || args["chars"] != "hello\n" {
+		t.Fatalf("public action changed process or routing context: %s %+v", tool, args)
 	}
 }
 

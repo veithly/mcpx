@@ -11,16 +11,18 @@ func pendingConfirmationItems(pending []approval.Pending) []map[string]any {
 			continue
 		}
 		tool := pendingItem.Tool
-		if tool == "command_execute" {
-			tool = "execute"
-		}
 		item := map[string]any{
 			"tool":       tool,
 			"summary":    pendingItem.Summary,
 			"workspace":  pendingItem.Workspace,
 			"created_at": pendingItem.CreatedAt,
 		}
-		item["user_confirmed_required"] = true
+		if tool == "exec_command" {
+			item["approval_id"] = pendingItem.ID
+			item["approval_source"] = "operator_console"
+		} else {
+			item["user_confirmed_required"] = true
+		}
 		if pendingItem.Command != "" {
 			item["command"] = pendingItem.Command
 			item["purpose"] = pendingItem.Purpose

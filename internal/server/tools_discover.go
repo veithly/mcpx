@@ -71,6 +71,10 @@ func (r *Runtime) skillToolDescribe(ctx context.Context, req *mcp.CallToolReques
 	if !ok {
 		return r.terminalError(envReq, session.ID, session.WorkspaceName, "SKILL_NOT_FOUND", fmt.Sprintf("skill %q was not found", name))
 	}
+	instructions, err := skillInstructions(sk)
+	if err != nil {
+		return r.terminalError(envReq, session.ID, session.WorkspaceName, "SKILL_READ_ERROR", fmt.Sprintf("cannot read instructions for skill %q: %v", name, err))
+	}
 	descriptor := skillItems([]skill.Skill{sk})[0]
 	revision, _ := descriptor["revision"].(string)
 	r.upsertDiscoveryLease(discoveryLease{
@@ -86,7 +90,7 @@ func (r *Runtime) skillToolDescribe(ctx context.Context, req *mcp.CallToolReques
 		"permissions":      sk.Manifest.Permissions,
 		"risk":             risk.publicData(),
 	}
-	if instructions, err := skillInstructions(sk); err == nil && instructions != "" {
+	if instructions != "" {
 		result["instructions"] = instructions
 	}
 	return r.remoteResult(envReq, session.ID, session.WorkspaceName, result)

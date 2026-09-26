@@ -3,10 +3,10 @@ package plan
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -141,7 +141,7 @@ func TestServiceEnforcesDependenciesAndCompletionEvidence(t *testing.T) {
 	if _, err := service.StartTask(ctx, remoteSessionID, created.ID, second, "principal-test"); err != nil {
 		t.Fatal(err)
 	}
-	verificationID := seedEvidenceEvent(t, store.DB(), remoteSessionID, "execute", "succeeded")
+	verificationID := seedToolEvidence(t, store.DB(), remoteSessionID, "exec_command", "succeeded", 0)
 	if _, err := service.CompleteTask(ctx, remoteSessionID, created.ID, second, "principal-test", []EvidenceInput{{Kind: EvidenceVerification, ReferenceID: verificationID, Metadata: map[string]any{"status": "passed"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestServiceDeliveryBlocksInvalidEvidenceUntilVerificationPasses(t *testing.
 	if _, err := service.StartTask(ctx, remoteSessionID, created.ID, apply, "principal-test"); err != nil {
 		t.Fatal(err)
 	}
-	verificationID := seedEvidenceEvent(t, store.DB(), remoteSessionID, "execute", "succeeded")
+	verificationID := seedToolEvidence(t, store.DB(), remoteSessionID, "exec_command", "succeeded", 0)
 	if _, err := service.CompleteTask(ctx, remoteSessionID, created.ID, apply, "principal-test", []EvidenceInput{{Kind: EvidenceVerification, ReferenceID: verificationID, Metadata: map[string]any{"status": "failed"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -244,21 +244,27 @@ func openPlanStore(t *testing.T) *state.Store {
 	return store
 }
 
-func seedEvidenceEvent(t *testing.T, db *sql.DB, remoteSessionID, tool, status string) string {
+func seedToolEvidence(t *testing.T, db *sql.DB, remoteSessionID, tool, status string, exitCode any) string {
 	t.Helper()
-	result, err := db.Exec(`INSERT INTO observation_events (workspace_name, remote_session_id, tool_name, event_type, status, created_at) VALUES ('test', ?, ?, 'tool.completed', ?, 1)`, remoteSessionID, tool, status)
+	id := newID("req_")
+	raw, err := json.Marshal(map[string]any{
+		"_meta":             map[string]any{"mcpx/request_id": id},
+		"structuredContent": map[string]any{"output": "test result", "exit_code": exitCode},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := result.LastInsertId()
+	_, err = db.Exec(`INSERT INTO tool_results (request_id, workspace_name, remote_session_id, tool_name, status, result_json, exit_code, created_at, updated_at)
+		VALUES (?, 'test', ?, ?, ?, ?, ?, 1, 1)`, id, remoteSessionID, tool, status, string(raw), exitCode)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return strconv.FormatInt(id, 10)
+	return id
 }
 
 func seedPlanSession(t *testing.T, db *sql.DB) string {
 	t.Helper()
+	t.Setenv("CODEX_HOME", t.TempDir())
 	workspace := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(workspace, "internal"), 0o700); err != nil {
 		t.Fatal(err)
@@ -279,4 +285,124 @@ func seedPlanSession(t *testing.T, db *sql.DB) string {
 		t.Fatal(err)
 	}
 	return "rs_plan_test"
+}
+
+func TestCodexEvidenceValidatesPersistedRequest(t *testing.T) {
+	cases := []struct {
+		name, kind, tool, status         string
+		exitCode                         any
+		otherSession, missing, wantValid bool
+	}{
+		{name: "read", kind: EvidenceRead, tool: "exec_command", status: "succeeded", exitCode: 0, wantValid: true},
+		{name: "edit", kind: EvidenceEdit, tool: "apply_patch", status: "succeeded", exitCode: 0, wantValid: true},
+		{name: "execute", kind: EvidenceExecute, tool: "exec_command", status: "succeeded", exitCode: 0, wantValid: true},
+		{name: "stdin", kind: EvidenceExecute, tool: "write_stdin", status: "succeeded", exitCode: 0, wantValid: true},
+		{name: "verification", kind: EvidenceVerification, tool: "write_stdin", status: "succeeded", exitCode: 0, wantValid: true},
+		{name: "nonzero", kind: EvidenceExecute, tool: "exec_command", status: "failed", exitCode: 7},
+		{name: "nonzero-status-cannot-override", kind: EvidenceRead, tool: "exec_command", status: "succeeded", exitCode: 7},
+		{name: "failed-patch", kind: EvidenceEdit, tool: "apply_patch", status: "failed", exitCode: 1},
+		{name: "verification-nonzero", kind: EvidenceVerification, tool: "exec_command", status: "failed", exitCode: 2},
+		{name: "running", kind: EvidenceExecute, tool: "exec_command", status: "accepted"},
+		{name: "missing-exit-code", kind: EvidenceExecute, tool: "write_stdin", status: "succeeded"},
+		{name: "failed-status", kind: EvidenceExecute, tool: "exec_command", status: "failed", exitCode: 0},
+		{name: "read-wrong-tool", kind: EvidenceRead, tool: "apply_patch", status: "succeeded", exitCode: 0},
+		{name: "edit-wrong-tool", kind: EvidenceEdit, tool: "exec_command", status: "succeeded", exitCode: 0},
+		{name: "execute-wrong-tool", kind: EvidenceExecute, tool: "apply_patch", status: "succeeded", exitCode: 0},
+		{name: "verification-wrong-tool", kind: EvidenceVerification, tool: "observe", status: "succeeded", exitCode: 0},
+		{name: "cross-session", kind: EvidenceEdit, tool: "apply_patch", status: "succeeded", exitCode: 0, otherSession: true},
+		{name: "missing", kind: EvidenceExecute, tool: "exec_command", status: "succeeded", exitCode: 0, missing: true},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := openPlanStore(t)
+			defer store.Close()
+			sessionID := seedPlanSession(t, store.DB())
+			service := NewService(store.DB())
+			item, err := service.Create(ctx, sessionID, "principal-test", CreateInput{Goal: "proof", Tasks: []TaskInput{{Title: "work"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.StartTask(ctx, sessionID, item.ID, item.Tasks[0].ID, "principal-test"); err != nil {
+				t.Fatal(err)
+			}
+			resultSession := sessionID
+			if test.otherSession {
+				resultSession = "rs_other"
+			}
+			id := "req_missing"
+			if !test.missing {
+				id = seedToolEvidence(t, store.DB(), resultSession, test.tool, test.status, test.exitCode)
+			}
+			_, err = service.CompleteTask(ctx, sessionID, item.ID, item.Tasks[0].ID, "principal-test", []EvidenceInput{{
+				Kind: test.kind, ReferenceID: id, Metadata: map[string]any{"status": "succeeded", "exit_code": 0, "passed": true},
+			}})
+			if !test.wantValid {
+				if !errors.Is(err, ErrEvidence) {
+					t.Fatalf("accepted invalid evidence: %v", err)
+				}
+				loaded, err := service.Get(ctx, sessionID, item.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if loaded.Tasks[0].Status != TaskInProgress || len(loaded.Tasks[0].Evidence) != 0 {
+					t.Fatalf("rejected evidence changed task: %+v", loaded.Tasks[0])
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			delivery, err := service.Deliver(ctx, sessionID, item.ID, "principal-test")
+			if err != nil || !delivery.Ready {
+				t.Fatalf("delivery=%+v err=%v", delivery, err)
+			}
+		})
+	}
+}
+
+func TestCodexDeliveryRechecksToolResults(t *testing.T) {
+	for _, kind := range []string{EvidenceRead, EvidenceEdit, EvidenceExecute, EvidenceVerification} {
+		for _, mutation := range []string{
+			"status = 'failed', exit_code = 9", "exit_code = NULL", "status = 'accepted'",
+			"remote_session_id = 'rs_other'", "tool_name = 'observe'", "delete",
+		} {
+			t.Run(kind+"/"+mutation, func(t *testing.T) {
+				ctx := context.Background()
+				store := openPlanStore(t)
+				defer store.Close()
+				sessionID := seedPlanSession(t, store.DB())
+				service := NewService(store.DB())
+				item, err := service.Create(ctx, sessionID, "principal-test", CreateInput{Goal: "recheck", Tasks: []TaskInput{{Title: "work"}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := service.StartTask(ctx, sessionID, item.ID, item.Tasks[0].ID, "principal-test"); err != nil {
+					t.Fatal(err)
+				}
+				tool := "exec_command"
+				if kind == EvidenceEdit {
+					tool = "apply_patch"
+				}
+				id := seedToolEvidence(t, store.DB(), sessionID, tool, "succeeded", 0)
+				if _, err := service.CompleteTask(ctx, sessionID, item.ID, item.Tasks[0].ID, "principal-test", []EvidenceInput{{Kind: kind, ReferenceID: id, Metadata: map[string]any{"passed": true}}}); err != nil {
+					t.Fatal(err)
+				}
+				query := "UPDATE tool_results SET " + mutation + " WHERE request_id = ?"
+				if mutation == "delete" {
+					query = "DELETE FROM tool_results WHERE request_id = ?"
+				}
+				if _, err := store.DB().Exec(query, id); err != nil {
+					t.Fatal(err)
+				}
+				delivery, err := service.Deliver(ctx, sessionID, item.ID, "principal-test")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if delivery.Ready || !strings.Contains(strings.Join(delivery.Blockers, ","), "tool_result_invalid:"+id) {
+					t.Fatalf("stale validation flag bypassed durable result: %+v", delivery)
+				}
+			})
+		}
+	}
 }

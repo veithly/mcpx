@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // TaskStatus is long-running process state.
@@ -578,6 +579,13 @@ func (m *TaskManager) Get(remoteSessionID, taskID string) (*Task, error) {
 		if t.log.path != "" {
 			t.stdoutLog.path = strings.TrimSuffix(t.log.path, ".log") + ".stdout.log"
 			t.stderrLog.path = strings.TrimSuffix(t.log.path, ".log") + ".stderr.log"
+			// Stream sizes are not stored in terminal_tasks. Recover the actual
+			// durable byte windows instead of treating existing files as empty.
+			for _, stream := range []*fileLog{&t.stdoutLog, &t.stderrLog} {
+				if info, err := os.Stat(stream.path); err == nil {
+					stream.size = info.Size()
+				}
+			}
 		}
 		t.db = m.db
 		if exitCode.Valid {
@@ -662,6 +670,18 @@ func (t *Task) logsFor(stream string, offset int) (chunk string, next int) {
 		data, next64, ok := f.read(int64(offset), logsChunkLimit)
 		if !ok {
 			return "", offset
+		}
+		// A byte limit may land inside a UTF-8 rune. Leave that incomplete
+		// suffix for the next read so JSON encoding cannot replace it with U+FFFD.
+		if next64 < f.size && len(data) > 0 {
+			start := len(data) - 1
+			for start > 0 && !utf8.RuneStart(data[start]) {
+				start--
+			}
+			if !utf8.FullRune(data[start:]) {
+				next64 -= int64(len(data) - start)
+				data = data[:start]
+			}
 		}
 		return string(data), int(next64)
 	}
@@ -816,6 +836,28 @@ func (t *Task) terminateForLimit(reason string) {
 	}
 }
 
+// Running returns all live tasks owned by the process, independently of the
+// bounded historical page. Completion state is copied while holding task locks.
+func (m *TaskManager) Running(remoteSessionID string) []map[string]any {
+	m.mu.Lock()
+	tasks := make([]*Task, 0, len(m.tasks))
+	for _, task := range m.tasks {
+		if task.RemoteSessionID == remoteSessionID {
+			tasks = append(tasks, task)
+		}
+	}
+	m.mu.Unlock()
+	sort.Slice(tasks, func(i, j int) bool { return tasks[i].ID < tasks[j].ID })
+	result := make([]map[string]any, 0, len(tasks))
+	for _, task := range tasks {
+		view := task.StatusView()
+		if view["status"] == TaskRunning {
+			result = append(result, view)
+		}
+	}
+	return result
+}
+
 // List returns newest durable tasks for a Remote Session.
 func (m *TaskManager) List(remoteSessionID string, limit int) ([]map[string]any, error) {
 	if limit <= 0 || limit > 100 {
@@ -957,11 +999,16 @@ func (t *Task) Wait(ctx context.Context) bool {
 // persisted and is unavailable after a server restart.
 func (t *Task) WriteStdin(content string) error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	if t.Status != TaskRunning || t.stdin == nil {
+		t.mu.Unlock()
 		return fmt.Errorf("task stdin is unavailable")
 	}
-	_, err := io.WriteString(t.stdin, content)
+	stdin := t.stdin
+	t.mu.Unlock()
+	// A pipe write may block until the child reads. Never hold the lifecycle
+	// lock: Kill/Status/output collection must remain available, and closing
+	// the pipe during shutdown unblocks the writer.
+	_, err := io.WriteString(stdin, content)
 	return err
 }
 

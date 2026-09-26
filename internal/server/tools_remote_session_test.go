@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -109,14 +110,14 @@ func TestSessionResumeIncludesPendingConfirmations(t *testing.T) {
 	command := mcpresult.Request(map[string]any{
 		"intent":            "request pending command confirmation",
 		"remote_session_id": created.Session.ID,
-		"command":           "echo pending", "purpose": "inspect pending", "scope": "workspace",
+		"cmd":               "echo pending",
 	})
-	commandResult, err := rt.toolCommandExecute(context.Background(), command)
+	commandResult, err := rt.toolExecCommand(context.Background(), command)
 	if err != nil {
 		t.Fatal(err)
 	}
 	commandResponse := decodeToolResult(t, commandResult)
-	if commandResponse["status"] != "waiting_confirmation" {
+	if !commandResult.IsError || !strings.Contains(fmt.Sprint(commandResult.StructuredContent), "APPROVAL_REQUIRED") {
 		t.Fatalf("command confirmation = %+v", commandResponse)
 	}
 
@@ -135,7 +136,7 @@ func TestSessionResumeIncludesPendingConfirmations(t *testing.T) {
 		t.Fatalf("session resume must expose pending confirmations: %+v", attachData)
 	}
 	item := items[0].(map[string]any)
-	if item["command"] != "echo pending" || item["purpose"] != "inspect pending" || item["user_confirmed_required"] != true {
+	if item["command"] != "echo pending" || item["purpose"] != "Execute requested programming command" || item["approval_source"] != "operator_console" {
 		t.Fatalf("pending confirmation item=%+v", item)
 	}
 }
@@ -216,24 +217,22 @@ func TestRemoteSessionResumeIncludesOnlyRunningTasks(t *testing.T) {
 		t.Fatalf("session open missing remote_session_id: %+v", opened)
 	}
 
-	completed := callEnvelope(t, rt.toolExecute, context.Background(), map[string]any{
-		"action": "run", "remote_session_id": remoteID, "purpose": "create completed task fixture",
-		"command": testPrintCommand("completed-resume-fixture"), "yield_time_ms": 5000,
-	})
-	completedData, _ := completed["data"].(map[string]any)
-	if completedData["completed_in_call"] != true {
-		t.Fatalf("completed fixture did not finish inline: %+v", completed)
+	ws, _ := rt.reg.Get("demo")
+	completed, err := rt.tasks.StartRemote(context.Background(), remoteID, "demo", ws.Path, testPrintCommand("completed-resume-fixture"))
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	running := callEnvelope(t, rt.toolExecute, context.Background(), map[string]any{
-		"action": "run", "remote_session_id": remoteID, "purpose": "create running task fixture",
-		"command": testSleepCommand(2 * time.Second), "yield_time_ms": 1,
-	})
-	runningData, _ := running["data"].(map[string]any)
-	runningID, _ := runningData["execution_task_id"].(string)
-	if runningID == "" {
-		t.Fatalf("running fixture missing execution_task_id: %+v", running)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if !completed.Wait(waitCtx) {
+		t.Fatal("fixture did not finish")
 	}
+	running, err := rt.tasks.StartRemote(context.Background(), remoteID, "demo", ws.Path, testSleepCommand(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runningID := running.ID
+	defer running.Kill()
 
 	resumed := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"action": "open", "remote_session_id": remoteID})
 	resumeData, _ := resumed["data"].(map[string]any)
@@ -249,9 +248,6 @@ func TestRemoteSessionResumeIncludesOnlyRunningTasks(t *testing.T) {
 		t.Fatalf("resume must not inject artifact history: %+v", resumeData["artifacts"])
 	}
 
-	_ = callEnvelope(t, rt.toolExecute, context.Background(), map[string]any{
-		"action": "stop", "remote_session_id": remoteID, "purpose": "stop running task fixture", "execution_task_id": runningID,
-	})
 }
 
 func TestRemoteSessionNotFoundExplainsExactCopy(t *testing.T) {

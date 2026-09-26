@@ -17,7 +17,7 @@ import (
 
 func TestVerificationLiveQueriesBypassEvenRestoredReplays(t *testing.T) {
 	for _, test := range []struct{ tool, action string }{
-		{"read", ""}, {"observe", ""}, {"execute", "attach"},
+		{"observe", ""},
 		{"operation_manage", "wait"}, {"operation_manage", "status"}, {"operation_manage", "result"},
 		{"workspace", ""}, {"session", "open"}, {"session", "list"},
 		{"artifact", "read"}, {"artifact", "list"}, {"plan", "read"},
@@ -34,63 +34,6 @@ func TestVerificationLiveQueriesBypassEvenRestoredReplays(t *testing.T) {
 				t.Fatal("live query reused or registered an effect-replay entry")
 			}
 		})
-	}
-}
-
-func TestVerificationSameReadSeesChangedUnicodeFile(t *testing.T) {
-	rt := newWorkspaceRuntime(t, "demo")
-	ws, _ := rt.reg.Get("demo")
-	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"workspace": "demo"})
-	remoteID := opened["remote_session_id"].(string)
-	path := filepath.Join(ws.Path, "中文 file.txt")
-	args := map[string]any{"remote_session_id": remoteID, "path": "中文 file.txt", "view": "file", "mode": "full"}
-	var previousRev string
-	for _, text := range []string{"第一版\r\n", "第二版\r\n"} {
-		if err := os.WriteFile(path, []byte(text), 0600); err != nil {
-			t.Fatal(err)
-		}
-		result := callEnvelope(t, rt.toolHandlers["read"], context.Background(), args)
-		data, _ := result["data"].(map[string]any)
-		rev := stringPayload(data, "rev")
-		if !statusOK(result) || data["content"] != text || rev == "" || rev == previousRev || data["sha256"] != nil {
-			t.Fatalf("same read did not return fresh content and revision: %+v", result)
-		}
-		previousRev = rev
-	}
-}
-
-func TestVerificationRepeatedAttachAndObserveStayLive(t *testing.T) {
-	for _, keyed := range []bool{false, true} {
-		rt := newWorkspaceRuntime(t, "demo")
-		opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"workspace": "demo"})
-		remoteID := opened["remote_session_id"].(string)
-		ws, _ := rt.reg.Get("demo")
-		task, err := rt.tasks.StartRemoteWithObservationContext(context.Background(), "req_poll", "req_poll", "execute", remoteID, "demo", ws.Path, "sleep 0.2; printf fresh-result")
-		if err != nil {
-			t.Fatal(err)
-		}
-		args := map[string]any{"remote_session_id": remoteID, "action": "attach", "execution_task_id": task.ID, "yield_time_ms": 1}
-		if keyed {
-			args["idempotency_key"] = "repeated-poll"
-		}
-		observed := map[string]any{"remote_session_id": remoteID, "view": "task", "execution_task_id": task.ID}
-		callEnvelope(t, rt.toolHandlers["execute"], context.Background(), args)
-		callEnvelope(t, rt.toolHandlers["observe"], context.Background(), observed)
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		finished := task.Wait(ctx)
-		cancel()
-		if !finished {
-			t.Fatal("fixture task did not finish")
-		}
-		attached := callEnvelope(t, rt.toolHandlers["execute"], context.Background(), args)
-		data, _ := attached["data"].(map[string]any)
-		if !statusOK(attached) || data["exit_code"] != float64(0) || data["stdout"] != "fresh-result" || data["status"] != "exited" {
-			t.Fatalf("keyed=%v: identical attach returned stale result: %+v", keyed, attached)
-		}
-		status := callEnvelope(t, rt.toolHandlers["observe"], context.Background(), observed)
-		if status["data"].(map[string]any)["status"] != "exited" {
-			t.Fatalf("identical observe returned stale result: %+v", status)
-		}
 	}
 }
 
@@ -226,29 +169,6 @@ func TestVerificationHistoryFindsExecuteByTimeAndKind(t *testing.T) {
 				t.Fatalf("history lost the executed command: %+v", result)
 			}
 		})
-	}
-}
-
-func TestVerificationCompletedCommandKeepsTaskAndReadableLogs(t *testing.T) {
-	rt := newWorkspaceRuntime(t, "demo")
-	rt.cfg.Security.Commands.Allow = append(rt.cfg.Security.Commands.Allow, `^printf\b`)
-	opened := callEnvelope(t, rt.toolSession, context.Background(), map[string]any{"workspace": "demo"})
-	remoteID := opened["remote_session_id"].(string)
-	result := callEnvelope(t, rt.toolExecute, context.Background(), map[string]any{
-		"action": "run", "remote_session_id": remoteID, "purpose": "verify retained execution receipt",
-		"command": "printf 'verified-中文'", "yield_time_ms": 1000,
-	})
-	data, _ := result["data"].(map[string]any)
-	taskID, _ := data["execution_task_id"].(string)
-	if !statusOK(result) || data["completed_in_call"] != true || taskID == "" {
-		t.Fatalf("completed command lost its recovery handle: %+v", result)
-	}
-	logs := callEnvelope(t, rt.toolObserve, context.Background(), map[string]any{
-		"remote_session_id": remoteID, "view": "logs", "execution_task_id": taskID,
-	})
-	logData, _ := logs["data"].(map[string]any)
-	if !statusOK(logs) || logData["exit_code"] != float64(0) || logData["stdout"] != "verified-中文" || logData["outcome"] != "succeeded" {
-		t.Fatalf("task receipt/logs cannot verify the completed command: %+v", logs)
 	}
 }
 

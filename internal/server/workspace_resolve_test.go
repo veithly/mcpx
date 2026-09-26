@@ -107,12 +107,12 @@ func TestRegisteredToolsExcludeCompatibilityInterfaces(t *testing.T) {
 	protocol := mcp.NewServer(&mcp.Implementation{Name: "mcpx-test", Version: "0.1.0"}, nil)
 	rt.registerTools(protocol)
 	tools := rt.listedToolMap()
-	for _, removed := range []string{"workspace_select", "code_read", "file_patch"} {
+	for _, removed := range []string{"workspace_select", "code_read", "file_patch", "read", "edit", "execute"} {
 		if _, exists := tools[removed]; exists {
 			t.Fatalf("removed compatibility tool %q is still registered", removed)
 		}
 	}
-	for _, required := range []string{"session", "read", "edit", "observe"} {
+	for _, required := range []string{"session", "exec_command", "write_stdin", "apply_patch", "observe"} {
 		if _, exists := tools[required]; !exists {
 			t.Fatalf("required tool %q is missing", required)
 		}

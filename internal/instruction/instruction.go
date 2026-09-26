@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"mcpx/internal/config"
+	"mcpx/internal/file"
 )
 
 var ErrNotFound = errors.New("agent instruction not found")
@@ -65,6 +66,11 @@ func DiscoverAt(globalAgentsPath, workspaceRoot, anchorPath string, maxBytes int
 		priority += 10
 	}
 	anchor := filepath.ToSlash(filepath.Clean(strings.TrimSpace(anchorPath)))
+	// Instruction discovery follows the same physical workspace boundary as
+	// source reads, including directory symlinks and parent components.
+	if _, err := file.Resolve(workspaceRoot, anchor); err != nil {
+		return markActiveChain(documents)
+	}
 	if anchor == "." || anchor == "" {
 		return markActiveChain(documents)
 	}
@@ -88,6 +94,9 @@ func DiscoverAt(globalAgentsPath, workspaceRoot, anchorPath string, maxBytes int
 		relDir := strings.Join(accum, "/")
 		id := "dir:" + relDir
 		path := filepath.Join(workspaceRoot, filepath.FromSlash(relDir), "AGENTS.md")
+		if _, err := file.Resolve(workspaceRoot, filepath.Join(filepath.FromSlash(relDir), "AGENTS.md")); err != nil {
+			continue
+		}
 		applies := relDir + "/**"
 		if document, ok := inspect(id, "directory", relDir, applies, path, priority, maxBytes); ok {
 			document.Active = true

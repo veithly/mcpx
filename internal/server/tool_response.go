@@ -80,7 +80,7 @@ func (r *Runtime) boundedToolWithLimits(name string, handler mcp.ToolHandler, ti
 			// its final outcome is still recorded (and replayable). Exactly one
 			// of the response and the late worker outcome wins; the pool slot
 			// stays occupied until the worker truly ends.
-			workerCtx := withClientContext(context.WithoutCancel(ctx), ctx)
+			workerCtx := withClientContext(context.WithoutCancel(ctx), callCtx)
 			workerCtx, workerCancel := context.WithTimeout(workerCtx, workerLimit)
 			defer workerCancel()
 			finished := make(chan struct{})

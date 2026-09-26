@@ -12,10 +12,8 @@ import (
 
 	"mcpx/internal/mcpresult"
 
-	"mcpx/internal/arc"
 	"mcpx/internal/envelope"
 	"mcpx/internal/operation"
-	"mcpx/internal/terminal"
 )
 
 func executionMode(req *mcp.CallToolRequest) string {
@@ -25,7 +23,7 @@ func executionMode(req *mcp.CallToolRequest) string {
 
 func asyncEligibleTool(name string) bool {
 	switch name {
-	case "session", "operation_batch", "operation_manage":
+	case "session", "operation_batch", "operation_manage", "exec_command", "write_stdin", "apply_patch":
 		return false
 	default:
 		return true
@@ -88,128 +86,7 @@ func (r *Runtime) executeOperationStep(ctx context.Context, input operation.Exec
 	request := mcpresult.Request(arguments)
 	childCtx := r.operationChildContext(ctx, input)
 	result, callErr := handler(childCtx, request)
-	if ctx.Err() != nil {
-		// The step was cancelled or hit its deadline while the tool ran. Stop
-		// any terminal Task the step already started so the process cannot
-		// outlive the step; Kill is a no-op for tasks that already finished.
-		r.killOperationTask(input, result)
-	}
-	if callErr == nil && input.Tool == "execute" {
-		result, callErr = r.waitForOperationTask(childCtx, input, result)
-	}
 	return operationResult(result, callErr)
-}
-
-// killOperationTask stops the terminal Task started by this step, if any, so
-// cancelled or timed-out operation steps do not leave shell processes running
-// in the background (occupying task slots, writing logs, producing side
-// effects). Kill is idempotent, so double calls are harmless.
-func (r *Runtime) killOperationTask(input operation.ExecuteInput, result *mcp.CallToolResult) {
-	if r.tasks == nil || result == nil {
-		return
-	}
-	taskID := resultTaskID(result)
-	if taskID == "" {
-		return
-	}
-	if task, err := r.tasks.Get(input.RemoteSessionID, taskID); err == nil {
-		_ = task.Kill()
-	}
-}
-
-func (r *Runtime) waitForOperationTask(ctx context.Context, input operation.ExecuteInput, result *mcp.CallToolResult) (*mcp.CallToolResult, error) {
-	taskID := resultTaskID(result)
-	if taskID == "" {
-		return result, nil
-	}
-	if r.tasks == nil {
-		return nil, errors.New("terminal task service is unavailable")
-	}
-	task, err := r.tasks.Get(input.RemoteSessionID, taskID)
-	if err != nil {
-		return nil, fmt.Errorf("wait for task %s: %w", taskID, err)
-	}
-	if !task.Wait(ctx) {
-		if ctx.Err() != nil {
-			// The operation step was cancelled or exceeded its deadline. Kill
-			// the underlying task so the process stops occupying a task slot,
-			// writing logs, or producing side effects after the step is gone.
-			_ = task.Kill()
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("task %s did not reach a terminal state", taskID)
-	}
-
-	data := r.taskResultData(task, 0, 0)
-	data["execution_task_id"] = task.ID
-	data["command"] = task.Command
-	data["purpose"] = input.Purpose
-	data["completed_in_call"] = true
-	data["operation_waited"] = true
-	capTaskExecutionOutput(data, 256<<10)
-	setTaskLogContinuation(data, input.RemoteSessionID)
-	exitCode, hasExitCode := data["exit_code"].(int)
-	if task.Status != terminal.TaskExited || !hasExitCode || exitCode != 0 {
-		code := "EXECUTION_FAILED"
-		message := fmt.Sprintf("command Task %s ended with status %s", task.ID, task.Status)
-		if hasExitCode {
-			stderr, _ := data["stderr"].(string)
-			code = commandFailureCode(exitCode, stderr)
-			message = commandFailureMessage(code, exitCode)
-		}
-		response := envelope.Fail(envelope.StatusError, input.RequestID, input.WorkspaceName, data, code, message)
-		response.RemoteSessionID = input.RemoteSessionID
-		return r.resultJSON(response)
-	}
-	response := envelope.OK(input.RequestID, input.WorkspaceName, data)
-	response.RemoteSessionID = input.RemoteSessionID
-	return r.resultJSON(response)
-}
-
-func resultTaskID(result *mcp.CallToolResult) string {
-	if result == nil {
-		return ""
-	}
-	// Current ARC responses keep business data in structuredContent while
-	// metadata omits it to avoid duplicating large tool results.
-	if wire, ok := result.StructuredContent.(map[string]any); ok {
-		if data, ok := wire["data"].(map[string]any); ok {
-			if taskID := strings.TrimSpace(findStringValue(data, "execution_task_id")); strings.HasPrefix(taskID, "task_") {
-				return taskID
-			}
-		}
-	}
-	if result.Meta != nil {
-		if metadata, ok := result.Meta[arc.ResultMetadataKey]; ok {
-			switch typed := metadata.(type) {
-			case arc.Envelope:
-				if taskID := strings.TrimSpace(findStringValue(typed.MCPX.Result.Data, "execution_task_id")); strings.HasPrefix(taskID, "task_") {
-					return taskID
-				}
-			case *arc.Envelope:
-				if typed != nil {
-					if taskID := strings.TrimSpace(findStringValue(typed.MCPX.Result.Data, "execution_task_id")); strings.HasPrefix(taskID, "task_") {
-						return taskID
-					}
-				}
-			}
-		}
-	}
-	for _, content := range result.Content {
-		textContent, ok := content.(*mcp.TextContent)
-		if !ok {
-			continue
-		}
-		var value any
-		if json.Unmarshal([]byte(textContent.Text), &value) != nil {
-			continue
-		}
-		taskID := strings.TrimSpace(findStringValue(value, "execution_task_id"))
-		if strings.HasPrefix(taskID, "task_") {
-			return taskID
-		}
-	}
-	return ""
 }
 
 func (r *Runtime) operationChildContext(ctx context.Context, input operation.ExecuteInput) context.Context {

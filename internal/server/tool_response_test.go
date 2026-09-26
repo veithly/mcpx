@@ -145,7 +145,7 @@ func TestToolCancelledBeforeAdmissionDoesNotRun(t *testing.T) {
 
 func TestEarlyToolValidationAndEmergencyMeetOutputSchema(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "demo")
-	result, err := rt.toolHandlers["execute"](context.Background(), mcpresult.Request(map[string]any{"action": "run", "command": false}))
+	result, err := rt.toolHandlers["runtime_read"](context.Background(), mcpresult.Request(map[string]any{"view": false}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,8 +209,8 @@ func TestBoundedToolLateWorkerOutcomeReplayable(t *testing.T) {
 	if value, _ := replayed.Meta["replayed"].(bool); !value {
 		t.Fatalf("replayed marker missing: %+v", replayed.Meta)
 	}
-	if reason, _ := replayed.Meta["replay_reason"].(string); reason != "prior attempt already completed" {
-		t.Fatalf("replay_reason = %q, want prior attempt already completed", reason)
+	if reason, _ := replayed.Meta["replay_reason"].(string); !strings.Contains(reason, "network interruption recovery") {
+		t.Fatalf("replay_reason = %q, want response interruption recovery", reason)
 	}
 	if atomic.LoadInt32(&executions) != 1 {
 		t.Fatalf("replay re-executed the tool body: %d executions", executions)
@@ -241,11 +241,11 @@ func TestInterruptedTaskOutcomeIsErrorEnvelope(t *testing.T) {
 	}
 	envelopeData, _ := wire["data"].(map[string]any)
 	next, _ := envelopeData["next_action"].(map[string]any)
-	if next["tool"] != "execute" {
+	if next["tool"] != "exec_command" {
 		t.Fatalf("interrupted next_action must guide a re-run: %+v", next)
 	}
 	arguments, _ := next["arguments"].(map[string]any)
-	if arguments["action"] != "run" || arguments["command"] != "make check" {
+	if arguments["cmd"] != "make check" {
 		t.Fatalf("interrupted re-run arguments = %+v", arguments)
 	}
 }

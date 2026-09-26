@@ -657,30 +657,14 @@ func validateEvidenceRefs(ctx context.Context, tx *sql.Tx, remoteSessionID strin
 
 func validateEvidenceRef(ctx context.Context, tx *sql.Tx, remoteSessionID, kind, referenceID string) (string, error) {
 	switch kind {
-	case EvidenceRead:
-		return validateObservationOrOperation(ctx, tx, remoteSessionID, referenceID, "read")
+	case EvidenceRead, EvidenceEdit, EvidenceExecute, EvidenceVerification:
+		outcomes, err := queryToolOutcomes(ctx, tx, remoteSessionID, []string{referenceID})
+		if err != nil {
+			return "", evidenceLookupError(kind, referenceID, err)
+		}
+		return "", outcomes[referenceID].validate(kind, referenceID)
 	case EvidenceObserve:
 		return validateObservationOrOperation(ctx, tx, remoteSessionID, referenceID, "observe")
-	case EvidenceVerification:
-		return validateObservationOrOperation(ctx, tx, remoteSessionID, referenceID, "")
-	case EvidenceEdit:
-		var state string
-		if err := tx.QueryRowContext(ctx, `SELECT state FROM clean_edit_records WHERE remote_session_id = ? AND id = ?`, remoteSessionID, referenceID).Scan(&state); err != nil {
-			return "", evidenceLookupError(kind, referenceID, err)
-		}
-		if state != "succeeded" {
-			return "", fmt.Errorf("%w: %s %s is not completed successfully (state=%s)", ErrEvidence, kind, referenceID, state)
-		}
-		return "", nil
-	case EvidenceExecute:
-		var status string
-		if err := tx.QueryRowContext(ctx, `SELECT status FROM terminal_tasks WHERE remote_session_id = ? AND id = ?`, remoteSessionID, referenceID).Scan(&status); err != nil {
-			return "", evidenceLookupError(kind, referenceID, err)
-		}
-		if status != "exited" {
-			return "", fmt.Errorf("%w: %s %s is not completed (status=%s)", ErrEvidence, kind, referenceID, status)
-		}
-		return "", nil
 	case EvidenceArtifact:
 		var id string
 		if err := tx.QueryRowContext(ctx, `SELECT id FROM artifacts WHERE remote_session_id = ? AND id = ?`, remoteSessionID, referenceID).Scan(&id); err != nil {
