@@ -107,6 +107,46 @@ func programmingWire(t *testing.T, result *mcp.CallToolResult) map[string]any {
 	return data
 }
 
+func TestProgrammingToolDeliversOperatorSteer(t *testing.T) {
+	rt, sessionID, _, call := programmingFixture(t)
+	ctx := context.Background()
+	queued, err := rt.control.Enqueue(ctx, "project", sessionID, "steer", "Review the new request before continuing", "programming-steer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := call("exec_command", map[string]any{"cmd": "printf done", "yield_time_ms": 1000})
+	if result.IsError {
+		t.Fatalf("command failed: %+v", result)
+	}
+	if _, wrapped := programmingWire(t, result)["context"]; wrapped {
+		t.Fatal("operator delivery changed the native programming result shape")
+	}
+	if _, present := result.Meta["mcpx/operator_control"]; !present {
+		t.Fatal("operator delivery is missing from MCP result metadata")
+	}
+	var visible strings.Builder
+	for _, item := range result.Content {
+		if text, ok := item.(*mcp.TextContent); ok {
+			visible.WriteString(text.Text)
+		}
+	}
+	if !strings.Contains(visible.String(), queued.ID) {
+		t.Fatalf("operator steer missing from programming result: %s", visible.String())
+	}
+	requests, err := rt.control.List(ctx, "project", sessionID)
+	if err != nil || len(requests) != 1 || requests[0].Status != "delivered" {
+		t.Fatalf("request not delivered: %+v, err=%v", requests, err)
+	}
+	ack := call("observe", map[string]any{"view": "session", "acknowledge_requests": []string{queued.ID}})
+	if ack.IsError {
+		t.Fatalf("acknowledgement failed: %+v", ack)
+	}
+	requests, err = rt.control.List(ctx, "project", sessionID)
+	if err != nil || len(requests) != 1 || requests[0].Status != "acknowledged" {
+		t.Fatalf("request not acknowledged: %+v, err=%v", requests, err)
+	}
+}
+
 func TestProgrammingRealWorkflow(t *testing.T) {
 	_, _, root, call := programmingFixture(t)
 	patch := "*** Begin Patch\n*** Add File: example.txt\n+before\n*** End Patch"

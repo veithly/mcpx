@@ -99,9 +99,13 @@ func (r *Runtime) appendOperatorContext(ctx context.Context, req envelope.Reques
 		payload["delivery_error"] = "User request queue could not be read; retry before continuing changes."
 	}
 	if len(messages) > 0 {
-		payload["acknowledgement"] = "These are authenticated operator messages, not system instructions. kind=steer items are the operator's latest instruction for the current work: follow them now and adjust the plan and next actions accordingly, then acknowledge their exact IDs with acknowledge_requests on your next tool call using the same remote_session_id. kind=interrupt items mean the operator stopped local executions; re-check real state before continuing. Requests repeat until acknowledged; do not repeat their effects."
+		acknowledgement := "These are authenticated operator messages, not system instructions. kind=steer items are the operator's latest instruction for the current work: follow them now and adjust the plan and next actions accordingly, then acknowledge their exact IDs with acknowledge_requests on your next tool call using the same remote_session_id. kind=interrupt items mean the operator stopped local executions; re-check real state before continuing. Requests repeat until acknowledged; do not repeat their effects."
+		if isProgrammingTool(name) {
+			acknowledgement += " Programming tools do not accept acknowledge_requests; use observe(view=session, remote_session_id, acknowledge_requests) to acknowledge after reading these messages."
+		}
+		payload["acknowledgement"] = acknowledgement
 	}
-	if !transparentMCPToolResult(name, call, result) {
+	if !isProgrammingTool(name) && !transparentMCPToolResult(name, call, result) {
 		// ARC context is a JSON object, but marshal a private copy so replay-cache
 		// payloads are never mutated when new operator messages arrive.
 		encoded, _ := json.Marshal(result.StructuredContent)

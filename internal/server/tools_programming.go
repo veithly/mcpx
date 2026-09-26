@@ -51,14 +51,15 @@ func (r *Runtime) addProgrammingTool(s *mcp.Server, tool mcp.Tool, handler mcp.T
 				result = programmingFailure("EXECUTION_ERROR", "Execution returned no result")
 			}
 			mcpresult.MetaSet(result, "mcpx/request_id", runtime.RequestID)
-			if r.observation != nil {
-				envReq, parseErr := r.parseEnv(ctx, req)
-				if parseErr == nil {
-					if envReq.RemoteSessionID == "" {
-						if p, e := r.principalFromContext(ctx); e == nil {
-							envReq.RemoteSessionID = r.boundRemoteSessionID(ctx, p)
-						}
+			envReq, parseErr := r.parseEnv(ctx, req)
+			if parseErr == nil {
+				if envReq.RemoteSessionID == "" {
+					if p, e := r.principalFromContext(ctx); e == nil {
+						envReq.RemoteSessionID = r.boundRemoteSessionID(ctx, p)
 					}
+				}
+				r.appendOperatorContext(ctx, envReq, tool.Name, req, result)
+				if r.observation != nil {
 					recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 					_ = r.observation.RecordToolCompleted(recordCtx, tool.Name, envReq, observationArguments(tool.Name, mcpresult.Arguments(req)), result, nil, makeInteractionTiming(runtime.StartedAtMs, started, time.Now()))
 					_ = r.observation.RecordToolResult(recordCtx, tool.Name, envReq, observationArguments(tool.Name, mcpresult.Arguments(req)), result, makeInteractionTiming(runtime.StartedAtMs, started, time.Now()))
