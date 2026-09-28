@@ -81,6 +81,21 @@ test('file change diffs attach to the edit that produced them', () => {
   assert.deepEqual(entries[0].diffs, ['--- a/a.go\n+++ b/a.go\n-old\n+new\n']);
   assert.deepEqual(entries[0].changed_paths, ['a.go']);
 });
+test('native patch creation and path-only changes stay on their tool cards', () => {
+  const created = timelineEntries([
+    event(1, { type: 'file.changed', tool: 'apply_patch', call_id: 'p', output: { paths: ['created.go'], diff_summary: '--- /dev/null\n+++ b/created.go\n@@ -0,0 +1 @@\n+hello\n', results: [{ path: 'created.go', operation: 'create', diff: '--- /dev/null\n+++ b/created.go\n@@ -0,0 +1 @@\n+hello\n' }] } }),
+    event(2, { type: 'tool.completed', tool: 'apply_patch', call_id: 'p', status: 'succeeded' }),
+  ]);
+  assert.equal(created.length, 1);
+  assert.deepEqual(created[0].changed_paths, ['created.go']);
+  assert.equal(created[0].diffs?.length, 1);
+  const pathOnly = timelineEntries([
+    event(1, { type: 'tool.completed', tool: 'apply_patch', call_id: 'binary', status: 'succeeded' }),
+    event(2, { type: 'file.changed', tool: 'apply_patch', call_id: 'binary', output: { paths: ['image.bin'], results: [{ path: 'image.bin', operation: 'create', diff_truncated: true }] } }),
+  ]);
+  assert.equal(pathOnly.length, 1);
+  assert.deepEqual(pathOnly[0].changed_paths, ['image.bin']);
+});
 test('command summary parsing separates stdout and stderr sections', () => {
   const parsed = parseCommandSummary('Context:\n- purpose: demo\n\nCommand completed with exit code 0.\n\nstdout:\nline1\nline2\n\nstderr:\nwarn1\n');
   assert.equal(parsed.note, 'Command completed with exit code 0.');

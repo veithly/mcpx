@@ -6,35 +6,38 @@ import type { Detail, Session, Task } from './model';
 
 interface LogPage { text: string; offset: number; next_offset: number; truncated: boolean; task: Task }
 interface ListTask extends Task { session_id: string; session_label: string }
-interface Props { workspace: string; session: string; sessions: Session[]; tasks: Task[]; selected: string; onSelect: (id: string) => void }
+interface NativeProcess { handle: number; session_id: string; session_label: string }
+interface Props { workspace: string; session: string; sessions: Session[]; tasks: Task[]; nativeProcesses: number[]; selected: string; onSelect: (id: string) => void }
 
 // In workspace overview mode there is no single session to read, so the most
 // recent sessions are polled and their execution tasks merged into one list.
 function useOverviewTasks(workspace: string, session: string, sessions: Session[]) {
-  const [aggregate, setAggregate] = useState<ListTask[]>([]);
+  const [aggregate, setAggregate] = useState<{ tasks: ListTask[]; native: NativeProcess[] }>({ tasks: [], native: [] });
   const overview = !session;
   useEffect(() => {
-    if (!overview || !workspace) { setAggregate([]); return; }
+    if (!overview || !workspace) { setAggregate({ tasks: [], native: [] }); return; }
     let stopped = false;
     const load = async () => {
       const recent = sessions.filter(item => item.workspace === workspace).slice(0, 8);
       const pages = await Promise.allSettled(recent.map(item => api<Detail>('detail?' + query(workspace, item.id))));
       const merged: ListTask[] = [];
+      const native: NativeProcess[] = [];
       pages.forEach((page, index) => {
         if (page.status !== 'fulfilled') return;
         const label = recent[index].label || recent[index].id.slice(0, 8);
         for (const task of page.value.tasks) merged.push({ ...task, session_id: recent[index].id, session_label: label });
+        for (const handle of page.value.native_process_sessions || []) native.push({ handle, session_id: recent[index].id, session_label: label });
       });
-      if (!stopped) setAggregate(merged);
+      if (!stopped) setAggregate({ tasks: merged, native });
     };
     void load();
     const timer = setInterval(load, 5000);
     return () => { stopped = true; clearInterval(timer); };
   }, [overview, workspace, session, sessions]);
-  return overview ? aggregate : [];
+  return overview ? aggregate : { tasks: [], native: [] };
 }
 
-export default function Terminal({ workspace, session, sessions, tasks, selected, onSelect }: Props) {
+export default function Terminal({ workspace, session, sessions, tasks, nativeProcesses, selected, onSelect }: Props) {
   const [stream, setStream] = useState('combined');
   const [text, setText] = useState('');
   const [error, setError] = useState('');
@@ -47,7 +50,8 @@ export default function Terminal({ workspace, session, sessions, tasks, selected
   const [liveTask, setLiveTask] = useState<Task | undefined>();
   const output = useRef<HTMLPreElement>(null);
   const aggregate = useOverviewTasks(workspace, session, sessions);
-  const list: ListTask[] = session ? tasks.map(item => ({ ...item, session_id: session, session_label: '' })) : aggregate;
+  const list: ListTask[] = session ? tasks.map(item => ({ ...item, session_id: session, session_label: '' })) : aggregate.tasks;
+  const native = session ? nativeProcesses.map(handle => ({ handle, session_id: session, session_label: '' })) : aggregate.native;
   const task = list.find(item => item.execution_task_id === selected) || list[0];
   const id = task?.execution_task_id || '';
   const owner = task?.session_id || session;
@@ -102,11 +106,18 @@ export default function Terminal({ workspace, session, sessions, tasks, selected
   return <section className="terminal-section" aria-label="终端日志">
     <div className="terminal-controls">
       <label className="task-select"><TerminalSquare size={16} /><select aria-label="选择执行任务" value={id} onChange={event => onSelect(event.target.value)} disabled={!list.length}>
-        {!list.length && <option value="">{session ? '暂无执行任务' : '这个 Workspace 最近没有执行任务'}</option>}
+        {!list.length && <option value="">{native.length ? '运行中的命令显示在下方' : session ? '暂无执行任务' : '这个 Workspace 最近没有执行任务'}</option>}
         {list.map(item => <option key={item.session_id + ':' + item.execution_task_id} value={item.execution_task_id}>{(item.session_label ? item.session_label + ' · ' : '') + (statusText[item.status] || item.status) + ' · ' + item.command.slice(0, 90)}</option>)}
       </select></label>
       {current && <span className="muted mono">{duration(current.runtime_ms)}</span>}
     </div>
+    {!!native.length && <div className="native-processes" aria-label="运行中的原生命令">
+      {native.map(item => <div className="native-process" key={item.session_id + ':' + item.handle}>
+        <span className="status-dot running" aria-hidden="true"/>
+        <span>{item.session_label ? item.session_label + ' · ' : ''}命令会话 #{item.handle} 正在运行</span>
+        <small>输出随 Agent 工具结果返回</small>
+      </div>)}
+    </div>}
     <div className="terminal-window">
       <header className="terminal-bar">
         <div className="terminal-lights" aria-hidden="true"><i/><i/><i/></div>
@@ -119,7 +130,7 @@ export default function Terminal({ workspace, session, sessions, tasks, selected
       <pre ref={output} className="terminal-output" tabIndex={0} aria-label="实时输出" onScroll={() => {
         const element = output.current;
         if (element && element.scrollHeight - element.scrollTop - element.clientHeight > 60) setFollow(false);
-      }}>{visible || (id ? (search ? '没有匹配的日志。' : '等待程序输出…') : (session ? '这个会话还没有执行过命令。' : '选择一个会话，查看它真实执行过的命令和输出。'))}</pre>
+      }}>{visible || (id ? (search ? '没有匹配的日志。' : '等待程序输出…') : native.length ? '运行中的命令输出请查看 Agent 的工具结果。' : (session ? '这个会话还没有执行过命令。' : '选择一个会话，查看它真实执行过的命令和输出。'))}</pre>
       {error && <p className="terminal-error" role="alert">{error}</p>}
       <footer className="terminal-footer">
         <span><i className={'status-dot ' + (current?.status === 'running' ? 'running' : '')}/>{current ? statusText[current.status] || current.status : '无任务'}{current?.exit_code !== undefined && ` · exit ${current.exit_code}`}{stopNote && ` · ${stopNote}`}</span>

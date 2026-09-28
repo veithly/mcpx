@@ -31,14 +31,16 @@ type Result struct {
 	ExitCode int
 	// Unique workspace-relative candidate paths, not a completed-write receipt.
 	Paths []string
+	// Actual file mutations, for observation only; not part of Codex tool output.
+	Changes []Change `json:"-"`
 }
 
 // Apply parses the entire input and validates every target before writing.
 // Syntax and application failures have ExitCode 1 and diagnostic Output.
 // Policy, containment, cancellation and detected concurrent changes return Go
 // errors. Paths are candidates; a later failure never rolls back earlier files.
-func Apply(ctx context.Context, request Request) (Result, error) {
-	result := Result{ExitCode: -1}
+func Apply(ctx context.Context, request Request) (result Result, err error) {
+	result = Result{ExitCode: -1}
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
@@ -114,6 +116,8 @@ func Apply(ctx context.Context, request Request) (Result, error) {
 		result.Output = "No files were modified.\n"
 		return result, nil
 	}
+	changes := newChangeTracker()
+	defer func() { result.Changes = changes.list() }()
 	summaries := map[byte][]string{}
 	for _, h := range hunks {
 		if err := ctx.Err(); err != nil {
@@ -134,9 +138,12 @@ func Apply(ctx context.Context, request Request) (Result, error) {
 		var changed []string
 		switch h.kind {
 		case 'A':
-			changed, err = w.write(ctx, t, []byte(h.contents.String()), true)
+			data := []byte(h.contents.String())
+			changed, err = w.write(ctx, t, data, true)
 			if err != nil {
 				err = fmt.Errorf("Failed to write file %s", abs)
+			} else {
+				changes.record(t.relative, t.contents, t.info != nil, data, true)
 			}
 		case 'D':
 			err = w.remove(t)
@@ -144,6 +151,7 @@ func Apply(ctx context.Context, request Request) (Result, error) {
 				err = fmt.Errorf("Failed to delete file %s", abs)
 			} else {
 				changed = []string{t.relative}
+				changes.record(t.relative, t.contents, true, nil, false)
 			}
 		case 'M':
 			if t.info == nil || !t.info.Mode().IsRegular() {
@@ -159,11 +167,13 @@ func Apply(ctx context.Context, request Request) (Result, error) {
 			if err != nil {
 				break
 			}
-			changed, err = w.write(ctx, dest, []byte(contents), h.hasMove)
+			data := []byte(contents)
+			changed, err = w.write(ctx, dest, data, h.hasMove)
 			if err != nil {
 				err = fmt.Errorf("Failed to write file %s", filepath.Join(w.physical, dest.relative))
 				break
 			}
+			changes.record(dest.relative, dest.contents, dest.info != nil, data, true)
 			if h.hasMove {
 				// Upstream writes the destination first. A failed source removal leaves
 				// both files. Even move-to-self follows this write-then-remove contract.
@@ -178,6 +188,7 @@ func Apply(ctx context.Context, request Request) (Result, error) {
 					err = fmt.Errorf("Failed to remove original %s", abs)
 				} else {
 					changed = append(changed, t.relative)
+					changes.record(source.relative, source.contents, source.info != nil, nil, false)
 				}
 			}
 		}

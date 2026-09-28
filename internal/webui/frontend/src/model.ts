@@ -6,7 +6,7 @@ export interface Auth { authenticated: boolean; csrf?: string; auth_mode?: strin
 export interface Task { execution_task_id: string; command: string; status: string; runtime_ms: number; exit_code?: number; log_truncated: boolean }
 export interface UserRequest { id: string; body: string; kind: string; status: string; created_at: number; delivered_at?: number; acknowledged_at?: number; remote_session_id?: string; replayed?: boolean }
 export interface Approval { id: string; tool: string; summary: string; command: string; scope: string; decision: string; can_decide: boolean }
-export interface Detail { tasks: Task[]; requests: UserRequest[]; approvals: Approval[]; access_mode: AccessMode; session_info?: Session }
+export interface Detail { tasks: Task[]; native_process_sessions?: number[]; requests: UserRequest[]; approvals: Approval[]; access_mode: AccessMode; session_info?: Session }
 export interface ActivityOutput { stream: string; text: string }
 export interface Activity {
   sequence: number; type: string; workspace: string;
@@ -31,6 +31,7 @@ export const emptyDetail: Detail = { tasks: [], requests: [], approvals: [], acc
 export const requestStatus: Record<string, string> = { cancelled: '项目或会话已删除，请求已取消', queued: '等待 GPT 调用', delivered: '已附加到工具响应', acknowledged: 'GPT 已回执' };
 export const statusText: Record<string, string> = { started: '进行中', running: '执行中', exited: '已退出', killed: '已停止', succeeded: '已完成', failed: '失败', waiting_confirmation: '等待审批', active: '会话就绪', closed: '已关闭', interrupted: '已中断', accepted: '已接受', cancelled: '已取消' };
 export const toolTitles: Record<string, string> = {
+  exec_command: '执行命令', write_stdin: '继续命令', apply_patch: '编辑文件',
   execute: '执行命令', edit: '编辑文件', read: '读取文件', session: '会话', workspace: '选择项目',
   observe: '查看进度', plan: '计划', progress: '进度', artifact: '产物', move_out: '迁移产物',
   skill_tool: '技能', operation_batch: '批量操作', operation_manage: '操作管理', secret_provide: '提供密钥',
@@ -56,10 +57,10 @@ function appendOutput(map: Map<string, ActivityOutput[]>, callId: string, event:
 function diffTextsOf(event: Activity): { diffs: string[]; paths: string[] } {
   const out = event.output as { diff_summary?: unknown; paths?: unknown; results?: unknown } | null;
   const diffs: string[] = []; const paths: string[] = [];
-  if (typeof out?.diff_summary === 'string' && out.diff_summary) diffs.push(out.diff_summary);
   if (Array.isArray(out?.results)) for (const item of out.results as { diff?: unknown }[]) {
     if (typeof item?.diff === 'string' && item.diff && !diffs.includes(item.diff)) diffs.push(item.diff);
   }
+  if (!diffs.length && typeof out?.diff_summary === 'string' && out.diff_summary) diffs.push(out.diff_summary);
   if (Array.isArray(out?.paths)) for (const p of out.paths as unknown[]) if (typeof p === 'string') paths.push(p);
   if (event.path && !paths.includes(event.path)) paths.unshift(event.path);
   return { diffs, paths };
@@ -128,7 +129,7 @@ export function timelineEntries(events: Activity[]): Activity[] {
     const merged = outputs.get(key);
     const changed = changes.get(key);
     if (merged?.length) out[index] = { ...out[index], outputs: merged };
-    if (changed?.diffs.length) out[index] = { ...out[index], diffs: changed.diffs, changed_paths: changed.paths };
+    if (changed && (changed.diffs.length || changed.paths.length)) out[index] = { ...out[index], diffs: changed.diffs, changed_paths: changed.paths };
   }
   return out;
 }

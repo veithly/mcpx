@@ -26,6 +26,68 @@ func TestConsoleCommandWindowExcludesPollingAndHasExactBoundary(t *testing.T) {
 		})
 	}
 }
+
+func TestConsoleShowsNativeProcessAsActive(t *testing.T) {
+	rt, sessionID, _, call := programmingFixture(t)
+	result := call("exec_command", map[string]any{"cmd": "sleep 20", "yield_time_ms": 250})
+	if result.IsError || programmingWire(t, result)["session_id"] == nil {
+		t.Fatalf("native command did not remain active: %+v", result)
+	}
+	c := consoleLogin(t, rt)
+	state := getSidebar(t, c, "")
+	var workspace consoleWorkspace
+	for _, item := range state.Workspaces {
+		if item.Name == "project" {
+			workspace = item
+		}
+	}
+	if !workspace.IsActive || workspace.Working != 1 || workspace.PreferredSessionID != sessionID {
+		t.Fatalf("native command missing from active project: %+v", workspace)
+	}
+	var session consoleSession
+	for _, item := range state.Sessions {
+		if item.ID == sessionID {
+			session = item
+		}
+	}
+	if session.RunningTasks != 1 || !session.IsWorking || !session.RecentCommand {
+		t.Fatalf("native command missing from active session: %+v", session)
+	}
+	response := c.request(t, "GET", "detail?workspace=project&session_id="+sessionID, nil)
+	if response.Code != 200 {
+		t.Fatalf("detail %d: %s", response.Code, response.Body.String())
+	}
+	var detail struct {
+		Session         consoleSession `json:"session_info"`
+		NativeProcesses []int          `json:"native_process_sessions"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Session.RunningTasks != 1 || len(detail.NativeProcesses) != 1 {
+		t.Fatalf("native command missing from detail: %+v", detail)
+	}
+}
+
+func TestConsoleShowsRecentNativeCommand(t *testing.T) {
+	rt, sessionID, _, call := programmingFixture(t)
+	result := call("exec_command", map[string]any{"cmd": "printf done", "yield_time_ms": 1000})
+	if result.IsError {
+		t.Fatalf("native command failed: %+v", result)
+	}
+	state := getSidebar(t, consoleLogin(t, rt), "")
+	for _, session := range state.Sessions {
+		if session.ID != sessionID {
+			continue
+		}
+		if !session.RecentCommand || session.LastCommandAt == 0 {
+			t.Fatalf("recent native command missing: %+v", session)
+		}
+		return
+	}
+	t.Fatal("native command session missing from sidebar")
+}
+
 func TestConsoleActiveWorkspaceAndPreferredSessionSurvivePagination(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "alpha", "beta")
 	c := consoleLogin(t, rt)

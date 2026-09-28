@@ -8,6 +8,7 @@ require (
 	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/pmezard/go-difflib v1.0.0
 	github.com/wailsapp/wails/v3 v3.0.0-beta.10
 	golang.org/x/sys v0.46.0
 	gopkg.in/yaml.v3 v3.0.1

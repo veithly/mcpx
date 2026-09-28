@@ -70,6 +70,20 @@ func sessionLess(a, b consoleSession) bool {
 	return a.ID < b.ID
 }
 
+// Native exec sessions do not have rows in terminal_tasks. Snapshot their
+// running handles for the operator console without consuming process output.
+func (r *Runtime) consoleNativeProcesses() map[string][]int {
+	r.processMu.Lock()
+	defer r.processMu.Unlock()
+	active := make(map[string][]int)
+	for sessionID, client := range r.processClients {
+		if handles := client.ActiveSessions(); len(handles) > 0 {
+			active[sessionID] = handles
+		}
+	}
+	return active
+}
+
 // Caller holds consoleMu; preferences and in-flight state cannot change between
 // producing the ordering and its mutation revision.
 func (c *consoleHandler) snapshot(ctx context.Context) ([]consoleWorkspace, []consoleSession, control.SidebarState, error) {
@@ -79,6 +93,8 @@ func (c *consoleHandler) snapshot(ctx context.Context) ([]consoleWorkspace, []co
 		return nil, nil, state, err
 	}
 	prefs := sidebarPreference(state.Items)
+	nativeProcesses := r.consoleNativeProcesses()
+	now := time.Now().UnixMilli()
 	workspaces := []consoleWorkspace{}
 	visible := map[string]bool{}
 	for _, ws := range r.reg.List() {
@@ -97,21 +113,24 @@ func (c *consoleHandler) snapshot(ctx context.Context) ([]consoleWorkspace, []co
  MAX(rs.last_active_at, COALESCE((SELECT MAX(e.created_at) FROM observation_events e WHERE e.remote_session_id=rs.id),0)),
  (SELECT COUNT(*) FROM terminal_tasks t WHERE t.remote_session_id=rs.id AND t.status='running'),
  (SELECT COUNT(*) FROM operations o WHERE o.remote_session_id=rs.id AND o.state IN ('queued','running')),
- COALESCE((SELECT MAX(MAX(t.started_at,COALESCE(t.finished_at,0))) FROM terminal_tasks t WHERE t.remote_session_id=rs.id),0)
- FROM remote_sessions rs`)
+ COALESCE((SELECT MAX(MAX(t.started_at,COALESCE(t.finished_at,0))) FROM terminal_tasks t WHERE t.remote_session_id=rs.id),0),
+ COALESCE((SELECT MAX(tr.updated_at) FROM tool_results tr WHERE tr.workspace_name=rs.workspace_name AND tr.remote_session_id=rs.id AND tr.updated_at>=? AND tr.tool_name IN ('exec_command','write_stdin','apply_patch')),0)
+ FROM remote_sessions rs`, now-consoleActiveWindowMS)
 	if err != nil {
 		return nil, nil, state, err
 	}
 	sessions := []consoleSession{}
 	working := map[string]int{}
 	byWorkspace := map[string][]consoleSession{}
-	now := time.Now().UnixMilli()
 	for rows.Next() {
 		var s consoleSession
-		if err = rows.Scan(&s.ID, &s.Workspace, &s.Path, &s.Label, &s.Description, &s.Status, &s.LastActive, &s.RunningTasks, &s.RunningOperations, &s.LastCommandAt); err != nil {
+		var nativeCommandAt int64
+		if err = rows.Scan(&s.ID, &s.Workspace, &s.Path, &s.Label, &s.Description, &s.Status, &s.LastActive, &s.RunningTasks, &s.RunningOperations, &s.LastCommandAt, &nativeCommandAt); err != nil {
 			rows.Close()
 			return nil, nil, state, err
 		}
+		s.RunningTasks += len(nativeProcesses[s.ID])
+		s.LastCommandAt = max(s.LastCommandAt, nativeCommandAt)
 		pref := prefs[sidebarKey("session", s.ID)]
 		if pref.DeletedAt > 0 || !visible[s.Workspace] {
 			continue

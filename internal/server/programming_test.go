@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"mcpx/internal/observation"
 	"mcpx/internal/unifiedexec"
 	"net/http"
 	"net/http/httptest"
@@ -105,6 +107,56 @@ func programmingWire(t *testing.T, result *mcp.CallToolResult) map[string]any {
 		t.Fatalf("Programming result gained a second envelope: %+v", data)
 	}
 	return data
+}
+
+func TestProgrammingPatchEmitsVisibleFileChanges(t *testing.T) {
+	rt, sessionID, root, call := programmingFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "old.txt"), []byte("before\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	result := call("apply_patch", map[string]any{"input": "*** Begin Patch\n*** Add File: new.txt\n+created\n*** Update File: old.txt\n@@\n-before\n+after\n*** End Patch"})
+	if result.IsError {
+		t.Fatalf("patch failed: %+v", result)
+	}
+	events, _, err := rt.observation.store.Query(context.Background(), observation.HistoryQuery{
+		Workspace: "project", SessionID: sessionID, Kinds: []string{observation.TypeFileChanged}, Limit: 20,
+	})
+	if err != nil || len(events) != 1 || events[0].Tool != "apply_patch" {
+		t.Fatalf("patch file-change events=%+v err=%v", events, err)
+	}
+	var payload struct {
+		Paths   []string `json:"paths"`
+		Results []struct {
+			Path      string `json:"path"`
+			Operation string `json:"operation"`
+			Diff      string `json:"diff"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(events[0].Output, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Paths) != 2 || len(payload.Results) != 2 ||
+		payload.Results[0].Path != "new.txt" || payload.Results[0].Operation != "create" || !strings.Contains(payload.Results[0].Diff, "+created") ||
+		payload.Results[1].Path != "old.txt" || payload.Results[1].Operation != "update" || !strings.Contains(payload.Results[1].Diff, "-before") || !strings.Contains(payload.Results[1].Diff, "+after") {
+		t.Fatalf("file changes lost create/update details: %+v", payload)
+	}
+}
+
+func TestProgrammingPatchPartialFailureReportsOnlyAppliedFiles(t *testing.T) {
+	rt, sessionID, root, call := programmingFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "old.txt"), []byte("before\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	result := call("apply_patch", map[string]any{"input": "*** Begin Patch\n*** Add File: created.txt\n+created\n*** Update File: old.txt\n@@\n-not-present\n+after\n*** End Patch"})
+	if !result.IsError {
+		t.Fatalf("expected partial failure: %+v", result)
+	}
+	events, _, err := rt.observation.store.Query(context.Background(), observation.HistoryQuery{
+		Workspace: "project", SessionID: sessionID, Kinds: []string{observation.TypeFileChanged}, Limit: 20,
+	})
+	if err != nil || len(events) != 1 || !strings.Contains(string(events[0].Output), "created.txt") || strings.Contains(string(events[0].Output), "old.txt") {
+		t.Fatalf("partial patch attributed unapplied file: events=%+v err=%v", events, err)
+	}
 }
 
 func TestProgrammingToolDeliversOperatorSteer(t *testing.T) {

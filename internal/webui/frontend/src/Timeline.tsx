@@ -9,7 +9,7 @@ function EventIcon({ event }: { event: Activity }) {
   if (event.status === 'failed') return <TriangleAlert size={16}/>;
   if (event.type === 'tool.started') return <LoaderCircle size={16} className="spin"/>;
   if (event.command || event.tool === 'execute') return <TerminalSquare size={16}/>;
-  if (event.tool === 'edit' || event.type === 'file.changed' || event.path) return <FileText size={16}/>;
+  if (event.tool === 'edit' || event.tool === 'apply_patch' || event.type === 'file.changed' || event.path) return <FileText size={16}/>;
   if (event.tool === 'mcp_tool') return <Globe size={16}/>;
   if (event.tool === 'read') return <Eye size={16}/>;
   if (event.type.startsWith('operator.')) return <MessageSquare size={16}/>;
@@ -64,7 +64,7 @@ function ToolBody({ event, onTask }: { event: Activity; onTask: (id: string, ses
   return <>
     {event.tool === 'execute' && event.command && <div className="cmd-row"><span className="cmd-prompt">$</span><code>{event.command}</code>{event.working_directory && <span className="cwd-chip" title={event.working_directory}>{event.working_directory.split('/').filter(Boolean).slice(-1)[0] || event.working_directory}</span>}{event.exit_code !== undefined && event.exit_code !== null && <span className={'exit-chip ' + (event.exit_code === 0 ? 'ok' : 'bad')}>exit {event.exit_code}</span>}</div>}
     {event.tool === 'read' && readTargets.length > 0 && <div className="edit-paths">{readTargets.map(path => <span className="path-chip" key={path}>{path}</span>)}</div>}
-    {event.tool === 'edit' && <div className="edit-paths">{describeEdits(event.input).map((line, index) => <span className="path-chip" key={index}>{line}</span>)}{(event.changed_paths ?? (event.path ? [event.path] : [])).map(path => <span className="path-chip" key={path}>{path}</span>)}</div>}
+    {(event.tool === 'edit' || event.tool === 'apply_patch') && <div className="edit-paths">{describeEdits(event.input).map((line, index) => <span className="path-chip" key={index}>{line}</span>)}{(event.changed_paths ?? (event.path ? [event.path] : [])).map(path => <span className="path-chip" key={path}>{path}</span>)}</div>}
     {event.tool === 'mcp_tool' && argsRows(event.input).length > 0 && <div className="args-table">{argsRows(event.input).map(([key, value]) => value.trim() && <div className="args-row" key={key}><small>{key}</small><code>{value.length > 220 ? value.slice(0, 220) + '…' : value}</code></div>)}</div>}
     {note.map((line, index) => line && <p className="event-note" key={index}>{line}</p>)}
     {streams.map((chunk, index) => <StreamView key={index} stream={chunk.stream} text={chunk.text}/>)}

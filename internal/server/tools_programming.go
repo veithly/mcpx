@@ -18,6 +18,7 @@ import (
 	"mcpx/internal/envelope"
 	workspacefile "mcpx/internal/file"
 	"mcpx/internal/mcpresult"
+	"mcpx/internal/observation"
 	"mcpx/internal/patch"
 	"mcpx/internal/remotesession"
 	"mcpx/internal/security"
@@ -306,6 +307,7 @@ func (r *Runtime) toolApplyPatch(ctx context.Context, req *mcp.CallToolRequest) 
 		}
 		return nil
 	}})
+	r.observeProgrammingPatch(ctx, envReq, remote, result, err)
 	if err != nil {
 		return programmingFailure("PATCH_REJECTED", err.Error()), nil
 	}
@@ -316,4 +318,43 @@ func (r *Runtime) toolApplyPatch(ctx context.Context, req *mcp.CallToolRequest) 
 	}
 	r.logAudit(audit.Event{RequestID: envReq.RequestID, RemoteSessionID: remote.ID, Workspace: remote.WorkspaceName, Tool: "apply_patch", Status: fmt.Sprintf("exit_%d", result.ExitCode), Detail: map[string]any{"paths": result.Paths}})
 	return out, nil
+}
+
+func (r *Runtime) observeProgrammingPatch(ctx context.Context, req envelope.Request, remote remotesession.Session, result patch.Result, applyErr error) {
+	if r.observation == nil || len(result.Changes) == 0 {
+		return
+	}
+	paths := make([]string, 0, len(result.Changes))
+	changes := make([]map[string]any, 0, len(result.Changes))
+	var combined strings.Builder
+	remainingDiffBytes := observation.MaxFileChangeEventBytes / 2
+	anyTruncated := false
+	for _, change := range result.Changes {
+		paths = append(paths, change.Path)
+		truncated := change.DiffTruncated
+		item := map[string]any{"path": change.Path, "operation": change.Operation, "diff_bytes": len(change.Diff)}
+		if change.Diff != "" && len(change.Diff) <= remainingDiffBytes {
+			item["diff"] = change.Diff
+			combined.WriteString(change.Diff)
+			remainingDiffBytes -= len(change.Diff)
+		} else if change.Diff != "" {
+			truncated = true
+		}
+		item["diff_truncated"] = truncated
+		anyTruncated = anyTruncated || truncated
+		changes = append(changes, item)
+	}
+	preview := boundedDiffPreview(combined.String(), cleanDiffTotalPreviewMaxBytes)
+	payload, _ := json.Marshal(map[string]any{"paths": paths, "results": changes,
+		"diff_summary": preview.Text, "diff_truncated": preview.Truncated || anyTruncated})
+	status := "succeeded"
+	if applyErr != nil || result.ExitCode != 0 {
+		status = "partial"
+	}
+	_ = r.observation.Record(ctx, observation.Event{
+		Workspace: remote.WorkspaceName, RemoteSessionID: remote.ID,
+		RequestID: req.RequestID, CallID: observationCallID(req), Tool: "apply_patch",
+		Type: observation.TypeFileChanged, Status: status, Output: payload,
+		Summary: fmt.Sprintf("patch changed %d file(s)", len(paths)), Path: paths[0],
+	})
 }

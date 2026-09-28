@@ -92,13 +92,13 @@ export default function Sidebar(props: Props) {
           const unfolded=expanded.has(ws.name)||!!needle;
           const visible=unfolded?(showAll.has(ws.name)||needle?matches:matches.slice(0,6)):[];
           return <section className="workspace-group" key={ws.name}>
-            {heading&&<div className="sidebar-section-label"><span>{group}</span>{group==='活跃项目'&&<small title="命令正在执行，或最近三分钟执行过命令">近 3 分钟</small>}</div>}
+            {heading&&<div className="sidebar-section-label"><span>{group}</span>{group==='活跃项目'&&<small title="命令正在执行，或最近三分钟有编程操作">近 3 分钟</small>}</div>}
             <div className={'sidebar-item'+dropClass(target)} onContextMenu={event=>showMenu(event,target)} onKeyDown={event=>menuKeyboard(event,target)} onDragOver={event=>over(event,target)} onDrop={event=>dropped(event,target)}>
               <div className={'workspace-row '+(workspace===ws.name?'selected':'')}>
                 {grip(target)}<button className="group-toggle" aria-label={(unfolded?'折叠 ':'展开 ')+ws.name} aria-expanded={unfolded} onClick={()=>toggle(ws.name)}>{unfolded?<ChevronDown size={14}/>:<ChevronRight size={14}/>}</button>
                 <button className="workspace-name" onClick={()=>props.choose(ws.name)} title={ws.path} aria-current={workspace===ws.name?'page':undefined}><Folder size={15}/><span>{ws.name}</span></button>
                 {ws.pinned&&<Pin className="pin-indicator" size={11} aria-label="已置顶"/>}
-                {ws.is_active&&<span className="status-dot running" title="近三分钟有命令执行"/>}
+                {ws.is_active&&<span className="status-dot running" title="近三分钟有编程操作"/>}
                 <span className="project-session-count" title={`${ws.session_count??all.length} 个会话，${ws.working_sessions||0} 个正在工作`}>{ws.working_sessions?`${ws.working_sessions} 运行`:ws.session_count??all.length}</span>{more(target)}
               </div>
             </div>

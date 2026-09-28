@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Activity, ArrowDown, ChevronRight, Folder, FolderPlus, Menu, MessageSquare, RefreshCw, ShieldCheck, ShieldOff, TerminalSquare } from 'lucide-react';
+import { Activity, ArrowDown, ChevronRight, FileDiff, Folder, FolderPlus, Menu, MessageSquare, RefreshCw, ShieldCheck, ShieldOff, TerminalSquare } from 'lucide-react';
 import { api, message, setCSRF } from './api';
 import type { Auth } from './model';
 import { useSidebar } from './useSidebar';
@@ -12,6 +12,7 @@ import { AccessSettings, AddWorkspace } from './Dialogs';
 import { Composer, Requests } from './Requests';
 import Terminal from './Terminal';
 import Timeline from './Timeline';
+import Changes from './Changes';
 import { useWorkspace } from './useWorkspace';
 
 export default function App() {
@@ -90,11 +91,12 @@ function Workbench({ theme, toggleTheme, logout }: { theme: string; toggleTheme:
       <div className="workspace-content">
         {activeWorkspace && <SessionStrip workspace={activeWorkspace} sessions={snapshot.sessions} selected={session} current={activeSession} choose={choose}/>}
         {!session && <section className="workspace-heading"><div><span className="eyebrow">WORKSPACE OVERVIEW</span><h1>{workspace || '你的工作，从这里开始。'}</h1><p>{activeWorkspace?.path || '添加一个项目，让工作有迹可循。'}</p></div>{(activeWorkspace?.working_sessions || 0) > 0 && <span className="running-pill"><i className="status-dot running"/>正在执行</span>}</section>}
-        <nav className="tabs" aria-label="任务视图">{[{ id: 'activity', label: '工作流', icon: <Activity size={15}/> }, { id: 'terminal', label: '终端', icon: <TerminalSquare size={15}/> }, { id: 'requests', label: '请求', icon: <MessageSquare size={15}/> }].map(item => <button key={item.id} aria-current={tab === item.id ? 'page' : undefined} className={tab === item.id ? 'active' : ''} onClick={() => setTab(item.id)}>{item.icon}{item.label}{item.id === 'requests' && !!(pending + unacknowledged) && <span className="tab-count">{pending + unacknowledged}</span>}</button>)}</nav>
+        <nav className="tabs" aria-label="任务视图">{[{ id: 'activity', label: '工作流', icon: <Activity size={15}/> }, { id: 'changes', label: '文件变更', icon: <FileDiff size={15}/> }, { id: 'terminal', label: '终端', icon: <TerminalSquare size={15}/> }, { id: 'requests', label: '请求', icon: <MessageSquare size={15}/> }].map(item => <button key={item.id} aria-current={tab === item.id ? 'page' : undefined} className={tab === item.id ? 'active' : ''} onClick={() => setTab(item.id)}>{item.icon}{item.label}{item.id === 'requests' && !!(pending + unacknowledged) && <span className="tab-count">{pending + unacknowledged}</span>}</button>)}</nav>
         {!!pending && tab !== 'requests' && <button className="approval-banner" onClick={() => setTab('requests')}><ShieldCheck size={16}/>{pending} 个操作正在等待审批（也可以直接在 GPT 对话中确认）<ChevronRight size={16}/></button>}
         <div ref={scroller} className="content-scroll" onScroll={() => { const el = scroller.current; if (el && el.scrollHeight - el.scrollTop - el.clientHeight > 80) setFollow(false); }}>
           {tab === 'activity' && <Timeline events={live.events} hasOlder={live.hasOlder} loadingOlder={live.loadingOlder} loadOlder={async () => { setFollow(false); await live.loadOlder(); }} onTask={viewTask}/>}
-          {tab === 'terminal' && <Terminal workspace={workspace} session={session} sessions={snapshot.sessions} tasks={live.detail.tasks} selected={selectedTask} onSelect={setSelectedTask}/>}
+          {tab === 'changes' && <Changes workspace={workspace} session={session}/>}
+          {tab === 'terminal' && <Terminal workspace={workspace} session={session} sessions={snapshot.sessions} tasks={live.detail.tasks} nativeProcesses={live.detail.native_process_sessions || []} selected={selectedTask} onSelect={setSelectedTask}/>}
           {tab === 'requests' && <Requests workspace={workspace} session={session} detail={live.detail} refreshed={live.refresh}/>}
           {!workspace && <button className="primary welcome-add" onClick={() => setModal('workspace')}><FolderPlus size={17}/>{snapshot.workspaces.length ? '添加 Workspace，或从左侧选择项目' : '添加第一个 Workspace'}</button>}
         </div>

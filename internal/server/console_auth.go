@@ -62,6 +62,7 @@ func (r *Runtime) consoleHandler() http.Handler {
 	mux.HandleFunc("POST "+consoleAPI+"workspaces", c.require(c.addWorkspace))
 	mux.HandleFunc("PUT "+consoleAPI+"access", c.require(c.setAccess))
 	mux.HandleFunc("GET "+consoleAPI+"detail", c.require(c.detail))
+	mux.HandleFunc("GET "+consoleAPI+"changes", c.require(c.changes))
 	mux.HandleFunc("GET "+consoleAPI+"events", c.require(c.events))
 	mux.HandleFunc("GET "+consoleAPI+"stream", c.require(c.stream))
 	mux.HandleFunc("GET "+consoleAPI+"logs", c.require(c.logs))
