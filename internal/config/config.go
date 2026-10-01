@@ -2,17 +2,18 @@ package config
 
 // Config is the Runtime YAML schema (global + project merge result).
 type Config struct {
-	Server     ServerConfig     `yaml:"server"`
-	Auth       AuthConfig       `yaml:"auth"`
-	Security   SecurityConfig   `yaml:"security"`
-	State      StateConfig      `yaml:"state"`
-	Workspaces []WorkspaceEntry `yaml:"workspaces"`
-	Terminal   TerminalConfig   `yaml:"terminal"`
-	FileWatch  FileWatchConfig  `yaml:"file_watch"`
-	Discovery  DiscoveryConfig  `yaml:"discovery"`
-	Logging    LoggingConfig    `yaml:"logging"`
-	Transport  TransportConfig  `yaml:"transport"`
-	Limits     LimitsConfig     `yaml:"limits"`
+	Server       ServerConfig       `yaml:"server"`
+	Auth         AuthConfig         `yaml:"auth"`
+	Security     SecurityConfig     `yaml:"security"`
+	State        StateConfig        `yaml:"state"`
+	Workspaces   []WorkspaceEntry   `yaml:"workspaces"`
+	Terminal     TerminalConfig     `yaml:"terminal"`
+	FileWatch    FileWatchConfig    `yaml:"file_watch"`
+	Discovery    DiscoveryConfig    `yaml:"discovery"`
+	Logging      LoggingConfig      `yaml:"logging"`
+	Transport    TransportConfig    `yaml:"transport"`
+	Limits       LimitsConfig       `yaml:"limits"`
+	OpenAITunnel OpenAITunnelConfig `yaml:"openai_tunnel,omitempty" json:"-"`
 	// Project-only fields merged into effective view:
 	Description string `yaml:"description,omitempty"`
 }

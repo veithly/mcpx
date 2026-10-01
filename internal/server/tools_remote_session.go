@@ -30,6 +30,9 @@ var (
 )
 
 func (r *Runtime) principalFromContext(ctx context.Context) (auth.Principal, error) {
+	if principal, ok := ctx.Value(openAITunnelPrincipalKey{}).(auth.Principal); ok {
+		return principal, nil
+	}
 	issuer, resource := r.authAudience()
 	credentials := auth.ValidateHTTP(
 		bearerFromCtx(ctx), config.EffectiveAuthMode(r.cfg.Auth), r.cfg.Auth.Token,

@@ -131,7 +131,11 @@ func (c *consoleHandler) sidebar(w http.ResponseWriter, r *http.Request) {
 			consoleError(w, 409, "任务仍在工作，请先停止执行并等待工具调用结束后再删除")
 			return
 		}
-		// Include queued/waiting operations, not only visible terminal processes.
+		if len(runtime.tasks.RunningTaskIDs(sessionTarget(input), input.Workspace)) > 0 {
+			consoleError(w, 409, "仍有后台命令在运行，请先结束后再删除")
+			return
+		}
+		// Include queued/waiting operations even when no tool call is currently open.
 		var active int
 		err = runtime.state.DB().QueryRowContext(r.Context(), `SELECT COUNT(*) FROM operations WHERE workspace_name=? AND (?='' OR remote_session_id=?) AND state IN ('queued','running','waiting_confirmation')`, input.Workspace, sessionTarget(input), sessionTarget(input)).Scan(&active)
 		if err != nil {

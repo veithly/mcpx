@@ -132,6 +132,8 @@ func merge(global, project Config, mergeAuth bool) Config {
 	out := global
 	if mergeAuth {
 		out.State.Retention = mergeRetention(global.State.Retention, project.State.Retention)
+		// Tunnel credentials and enablement belong to the process, never a workspace.
+		out.OpenAITunnel = project.OpenAITunnel
 	}
 
 	if project.Server.Host != "" {

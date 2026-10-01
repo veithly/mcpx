@@ -858,6 +858,40 @@ func (m *TaskManager) Running(remoteSessionID string) []map[string]any {
 	return result
 }
 
+// RunningTaskIDs returns the live in-process tasks matching the optional
+// Remote Session and Workspace filters. Durable rows are execution history;
+// current liveness comes from the manager that owns the child processes.
+func (m *TaskManager) RunningTaskIDs(remoteSessionID, workspaceName string) []string {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	tasks := make([]*Task, 0, len(m.tasks))
+	for _, task := range m.tasks {
+		tasks = append(tasks, task)
+	}
+	m.mu.Unlock()
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		task.mu.Lock()
+		running := task.Status == TaskRunning &&
+			(remoteSessionID == "" || task.RemoteSessionID == remoteSessionID) &&
+			(workspaceName == "" || task.WorkspaceName == workspaceName)
+		id := task.ID
+		task.mu.Unlock()
+		if running {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// RunningCount returns the number of live child processes owned by a Remote Session.
+func (m *TaskManager) RunningCount(remoteSessionID string) int {
+	return len(m.RunningTaskIDs(remoteSessionID, ""))
+}
+
 // List returns newest durable tasks for a Remote Session.
 func (m *TaskManager) List(remoteSessionID string, limit int) ([]map[string]any, error) {
 	if limit <= 0 || limit > 100 {

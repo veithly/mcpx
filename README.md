@@ -94,7 +94,8 @@ MCPX 强制应用服务端配置的权限。需要 Confirm 时，由现有 conso
 不暴露 `sandbox_permissions`、`justification`、`prefix_rule` 或模型可选的提权模式。
 这不是 Codex Agent 的 sandbox/approval 协议；cwd 的 Workspace 校验也不等于 OS 级沙箱。
 
-MCPX 提供 Streamable HTTP 的 `/mcp` 端点。
+MCPX 提供 Streamable HTTP 的 `/mcp` 端点，也支持内嵌 OpenAI Tunnel（无需公网 URL）。
+不提供旧版 HTTP+SSE 的 `/sse` 或 `/message` 兼容端点。
 
 ## 部署教程
 
@@ -107,11 +108,58 @@ MCPX 提供 Streamable HTTP 的 `/mcp` 端点。
 
 ### 环境要求
 
-- Go 1.26.1 或更高版本，具体版本以 `go.mod` 为准。
+- Go 1.27.0 或更高版本，具体版本以 `go.mod` 为准（内嵌 OpenAI Tunnel SDK 的要求）。
 - 本机 shell 与任务所需命令；三个编程核心不依赖 Codex CLI、模型或 API key。
 - 源码搜索示例需要 `rg`；读取使用系统 `cat` / `sed`。
 - 一个需要被 MCPX 管理的本地项目目录。
-- 远程访问时需要 HTTPS 反向代理或其他受信任的网络入口。
+- OpenAI Tunnel 只需要出站 HTTPS 连接；其他远程 HTTP 客户端仍需要 HTTPS 反向代理或其他受信任的网络入口。
+
+### OpenAI Tunnel：只配置 ID 和 Key，无需公网 URL
+
+在全局 `~/.mcpx/config.yaml`（或 `$MCPX_HOME/config.yaml`）添加：
+
+```yaml
+openai_tunnel:
+  id: "tunnel_0123456789abcdef0123456789abcdef"
+  key: "<具有该 Tunnel 使用权限的 OpenAI API Key>"
+```
+
+构建本版本并启动或重启 McpX 后，完整的 ID/Key 会自动启用隧道，无需另装
+`tunnel-client`、Cloudflare、FRP 或公网域名，也不要求填写 `auth.oauth.server_url`。
+保留默认 `server.host: 127.0.0.1` 即可；Tunnel 不新增本地监听端口，直接通过进程内
+MCP transport 调用同一组工具。这里的 Key 是 OpenAI Tunnel 运行凭证，不是 McpX
+的 HTTP Bearer Token，也不是 Cloudflare Tunnel Token。
+
+也可以使用服务进程的环境变量，不把 Key 写入 YAML：
+
+```bash
+export MCPX_OPENAI_TUNNEL_ID="tunnel_0123456789abcdef0123456789abcdef"
+export MCPX_OPENAI_TUNNEL_KEY="<OpenAI API Key>"
+./bin/mcpx
+```
+
+环境变量优先于 YAML，仅在运行时解析，不会因注册 Workspace 等配置更新被回写。
+通过 launchd、systemd 或桌面程序启动时，需要给该服务进程配置环境变量，不能只在
+另一个终端中 export。也可在 `openai_tunnel` 下设置 `enabled: false` 明确停用，
+即使凭证或环境变量仍在也不会连接。只配置 ID 或 Key 其中之一会明确报错。
+
+ChatGPT 的开发者应用中选择 **Connection → Tunnel**，选择或粘贴同一个 Tunnel ID；
+该 Tunnel 须关联目标 ChatGPT Workspace，运行 Key 须具备 **Tunnels Read + Use** 权限。
+使用 Responses API 时，MCP 工具配置填 `tunnel_id` 而不是 `server_url`。
+客户端只需能出站访问 OpenAI 控制面（默认 `api.openai.com:443`）；“无需公网 URL”
+不代表离线运行。参考 [OpenAI Secure MCP Tunnels](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
+和 [官方 Go SDK](https://github.com/openai/tunnel-client)。
+
+隧道随 McpX 启停，瞬时网络错误由官方 SDK 退避重试。运行日志中
+`first control-plane poll succeeded` 表示至少一次控制面往返成功，不是永久在线保证；
+仅看到 `started` 不代表凭证已被服务端接受。401/403 时检查 Key 权限与 Tunnel/Workspace
+归属，而不是填写公网链接。SDK 日志和启动错误会脱敏 Key，全局配置文件由 McpX
+写入时权限为 `0600`；不要把含 Key 的配置提交到仓库。
+
+Tunnel 是独立的受信任入口，不需要额外完成 McpX HTTP OAuth 登录，也不会关闭原
+HTTP Bearer/OAuth 鉴权。所有获准使用同一 Tunnel 的调用者共享该 Tunnel 的 McpX
+身份，仍受 Workspace、Remote Session 和安全规则约束；不要把 Tunnel 授权给不应
+访问此开发环境的人。切换 Tunnel ID 会切换身份，不会继承其他入口的私有会话。
 
 ### 从源码构建
 

@@ -1,8 +1,6 @@
 package server
 
 import (
-	"mcpx/internal/mcpresult"
-
 	"context"
 	"os"
 	"path/filepath"
@@ -13,6 +11,7 @@ import (
 
 	"mcpx/internal/auth"
 	"mcpx/internal/config"
+	"mcpx/internal/mcpresult"
 )
 
 func TestProjectTaskDiscoveryAndArtifactRemoteSessionFlow(t *testing.T) {
@@ -56,7 +55,6 @@ func TestProjectTaskDiscoveryAndArtifactRemoteSessionFlow(t *testing.T) {
 	if listed["status"] != "ok" {
 		t.Fatalf("project task discovery=%+v", listed)
 	}
-
 	data, _ := listed["data"].(map[string]any)
 	tasks, _ := data["project_tasks"].([]any)
 	foundTest := false

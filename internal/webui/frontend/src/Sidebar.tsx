@@ -1,12 +1,13 @@
 import { useCallback, useDeferredValue, useState } from 'react';
 import type { DragEvent, MouseEvent, KeyboardEvent } from 'react';
-import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, ExternalLink, Folder, GripVertical, LayoutGrid, LoaderCircle, LogOut, MoreHorizontal, Moon, Pin, PinOff, Plus, Search, Settings2, ShieldCheck, Sun, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, ExternalLink, Folder, GripVertical, Info, LayoutGrid, LoaderCircle, LogOut, MoreHorizontal, Moon, Pin, PinOff, Plus, Search, Settings2, ShieldCheck, Sun, Trash2, X } from 'lucide-react';
 import { Brand } from './Login';
 import { Modal } from './Dialogs';
 import ContextMenu from './ContextMenu';
 import type { MenuAction, MenuAnchor } from './ContextMenu';
-import { age } from './model';
-import type { Snapshot } from './model';
+import { api, message, query } from './api';
+import { age, duration, statusText } from './model';
+import type { Detail, Snapshot } from './model';
 import { canDrop, isWorking, sameSortGroup, sessionTarget, sessionURL, sortSessions, sortWorkspaces, workingLabel, workspaceTarget } from './sidebar-model';
 import type { SidebarMutation, SidebarTarget } from './sidebar-model';
 interface Props {
@@ -24,6 +25,16 @@ export default function Sidebar(props: Props) {
   const [showAll,setShowAll]=useState<Set<string>>(new Set());
   const [menu,setMenu]=useState<{item:SidebarTarget;anchor:MenuAnchor}>();
   const closeMenu=useCallback(()=>setMenu(undefined),[]);
+  const [detailItem,setDetailItem]=useState<SidebarTarget>();
+  const [detail,setDetail]=useState<Detail>();
+  const [detailError,setDetailError]=useState('');
+  const openDetail=(item:SidebarTarget)=>{
+    closeMenu();setDetailItem(item);setDetail(undefined);setDetailError('');
+    api<Detail>('detail?'+query(item.workspace,item.kind==='session'?item.id:''))
+      .then(setDetail)
+      .catch((error:unknown)=>setDetailError(message(error)));
+  };
+  const closeDetail=()=>{setDetailItem(undefined);setDetail(undefined);setDetailError('');};
   const [removing,setRemoving]=useState<SidebarTarget>();
   const [removeError,setRemoveError]=useState('');
   const [drag,setDrag]=useState<{item:SidebarTarget;revision:number}>();
@@ -64,6 +75,7 @@ export default function Sidebar(props: Props) {
     const group=all.filter(other=>sameSortGroup(item,other));const index=group.findIndex(other=>other.id===item.id);
     return [
       {id:'open',label:item.kind==='workspace'?'进入活跃会话':'进入会话',icon:<Folder size={15}/>,run:()=>props.choose(item.workspace,item.kind==='session'?item.id:undefined)},
+      {id:'detail',label:'查看详情',icon:<Info size={15}/>,run:()=>openDetail(item)},
       {id:'parallel',label:'在新标签页中打开',icon:<ExternalLink size={15}/>,run:()=>{const id=item.kind==='session'?item.id:workspaces.find(ws=>ws.name===item.workspace)?.preferred_session_id||'';window.open(sessionURL(item.workspace,id),'_blank','noopener,noreferrer');}},
       ...(item.kind==='workspace'?[{id:'overview',label:'项目总览',icon:<LayoutGrid size={15}/>,run:()=>props.choose(item.workspace,'')}]:[]),
       {id:'pin',label:item.pinned?'取消置顶':'置顶',icon:item.pinned?<PinOff size={15}/>:<Pin size={15}/>,disabled:busy,run:()=>void act(item,'pin',{pinned:!item.pinned})},
@@ -75,6 +87,7 @@ export default function Sidebar(props: Props) {
   const remove=async()=>{if(!removing)return;setRemoveError('');if(await act(removing,'delete',{confirm:true}))setRemoving(undefined);else setRemoveError('移除未完成。请检查会话是否仍在工作，再重试。');};
   const currentRemoving=removing?.kind==='session'?sessions.find(item=>item.id===removing.id):undefined;
   const removalWorking=removing?.kind==='workspace'?(workspaces.find(item=>item.name===removing.id)?.working_sessions||0)>0:currentRemoving?isWorking(currentRemoving):false;
+  const removalCommands=removing?.kind==='workspace'?sessions.some(item=>item.workspace===removing.id&&item.running_tasks>0):(currentRemoving?.running_tasks||0)>0;
   let lastGroup='';let matchedProjects=0;
   return <>
     {props.open&&<button className="sidebar-backdrop" aria-label="关闭侧栏" onClick={props.close}/>}
@@ -88,17 +101,17 @@ export default function Sidebar(props: Props) {
           const matches=all.filter(item=>!needle||`${item.label} ${item.description} ${item.id} ${ws.name}`.toLowerCase().includes(needle));
           if(needle&&!ws.name.toLowerCase().includes(needle)&&!matches.length)return null;
           matchedProjects++;
-          const group=needle?'搜索结果':ws.is_active?'活跃项目':'项目';const heading=lastGroup!==group;lastGroup=group;
+          const group=needle?'搜索结果':target.commandActive?'活跃项目':'项目';const heading=lastGroup!==group;lastGroup=group;
           const unfolded=expanded.has(ws.name)||!!needle;
           const visible=unfolded?(showAll.has(ws.name)||needle?matches:matches.slice(0,6)):[];
           return <section className="workspace-group" key={ws.name}>
-            {heading&&<div className="sidebar-section-label"><span>{group}</span>{group==='活跃项目'&&<small title="命令正在执行，或最近三分钟有编程操作">近 3 分钟</small>}</div>}
+            {heading&&<div className="sidebar-section-label"><span>{group}</span>{group==='活跃项目'&&<small title="Agent 正在工作、命令正在执行，或最近五分钟有新指令">实时 / 近 5 分钟</small>}</div>}
             <div className={'sidebar-item'+dropClass(target)} onContextMenu={event=>showMenu(event,target)} onKeyDown={event=>menuKeyboard(event,target)} onDragOver={event=>over(event,target)} onDrop={event=>dropped(event,target)}>
               <div className={'workspace-row '+(workspace===ws.name?'selected':'')}>
                 {grip(target)}<button className="group-toggle" aria-label={(unfolded?'折叠 ':'展开 ')+ws.name} aria-expanded={unfolded} onClick={()=>toggle(ws.name)}>{unfolded?<ChevronDown size={14}/>:<ChevronRight size={14}/>}</button>
-                <button className="workspace-name" onClick={()=>props.choose(ws.name)} title={ws.path} aria-current={workspace===ws.name?'page':undefined}><Folder size={15}/><span>{ws.name}</span></button>
+                <button className="workspace-name" onClick={()=>props.choose(ws.name)} title={[ws.description,ws.path].filter(Boolean).join('\n')||ws.name} aria-current={workspace===ws.name?'page':undefined}><Folder size={15}/><span>{ws.name}</span></button>
                 {ws.pinned&&<Pin className="pin-indicator" size={11} aria-label="已置顶"/>}
-                {ws.is_active&&<span className="status-dot running" title="近三分钟有编程操作"/>}
+                {target.commandActive&&<span className="status-dot running" title="Agent 正在工作、命令正在执行，或近五分钟有新指令"/>}
                 <span className="project-session-count" title={`${ws.session_count??all.length} 个会话，${ws.working_sessions||0} 个正在工作`}>{ws.working_sessions?`${ws.working_sessions} 运行`:ws.session_count??all.length}</span>{more(target)}
               </div>
             </div>
@@ -106,7 +119,7 @@ export default function Sidebar(props: Props) {
               const target=sessionTarget(item);
               return <div className={'sidebar-item'+dropClass(target)} key={item.id} onContextMenu={event=>showMenu(event,target)} onKeyDown={event=>menuKeyboard(event,target)} onDragOver={event=>over(event,target)} onDrop={event=>dropped(event,target)}>
                 <div className={'session-row '+(session===item.id?'selected ':'')+(target.working?'working-row':'')}>
-                  {grip(target)}<button className="session-select" title={target.label+'\n'+item.id} aria-current={session===item.id?'page':undefined} onClick={()=>props.choose(ws.name,item.id)}>
+                  {grip(target)}<button className="session-select" title={[target.label,item.description,item.id].filter(Boolean).join('\n')} aria-current={session===item.id?'page':undefined} onClick={()=>props.choose(ws.name,item.id)}>
                     {target.working?<LoaderCircle size={12} className="spin working-spinner"/>:<span className={'status-dot '+(item.status==='closed'?'closed':'')}/>}
                     <span className="session-copy"><span>{target.label}</span><small>{target.working?workingLabel(item):age(item.last_active_at)}<code>{item.id.slice(-6)}</code></small></span>
                   </button>{item.pinned&&<Pin className="pin-indicator" size={10} aria-label="已置顶"/>}{more(target)}
@@ -124,12 +137,29 @@ export default function Sidebar(props: Props) {
       <footer className="sidebar-footer"><button disabled={!workspace} onClick={props.settings}><Settings2 size={16}/>项目设置</button><button onClick={props.permissions}><ShieldCheck size={16}/>系统权限</button><div><span className="runtime-version">Runtime {snapshot.version}{busy?' · 保存中':''}</span><button className="icon-button" aria-label="切换明暗主题" onClick={props.toggleTheme}>{props.theme==='dark'?<Sun size={16}/>:<Moon size={16}/>}</button><button className="icon-button" aria-label="退出登录" onClick={props.logout}><LogOut size={16}/></button></div></footer>
     </aside>
     {menu&&<ContextMenu anchor={menu.anchor} label={menu.item.label} actions={menuActions()} close={closeMenu}/>}
+    {detailItem&&(()=>{const wsSnapshot=workspaces.find(item=>item.name===detailItem.workspace);const sessionSnapshot=detailItem.kind==='session'?sessions.find(item=>item.id===detailItem.id):undefined;const description=sessionSnapshot?.description||wsSnapshot?.description||'';return <Modal title={detailItem.kind==='workspace'?'项目详情':'会话详情'} close={closeDetail}>
+      <p className="modal-description"><strong>{detailItem.label}</strong>{description&&<span> — {description}</span>}</p>
+      <dl className="detail-grid">
+        <dt>ID</dt><dd><code>{detailItem.id}</code></dd>
+        {detailItem.path&&<><dt>路径</dt><dd><code>{detailItem.path}</code></dd></>}
+        {sessionSnapshot&&<><dt>状态</dt><dd>{statusText[sessionSnapshot.status]||sessionSnapshot.status}{sessionSnapshot.is_working?' · '+workingLabel(sessionSnapshot):''}</dd>
+        <dt>最近活跃</dt><dd>{age(sessionSnapshot.last_active_at)}{sessionSnapshot.recent_command?' · 近 5 分钟有新指令':''}</dd>
+        <dt>执行状态</dt><dd>{sessionSnapshot.running_calls||0} 个在途调用 · {sessionSnapshot.running_operations||0} 个进行中操作 · {sessionSnapshot.running_tasks||0} 个后台进程</dd></>}
+        {detailItem.kind==='workspace'&&wsSnapshot&&<><dt>会话</dt><dd>{wsSnapshot.session_count??'—'} 个，其中 {wsSnapshot.active_sessions||0} 个活跃</dd></>}
+        {detail?.access_mode&&<><dt>访问模式</dt><dd>{detail.access_mode==='full_access'?'完全访问':'审批模式'}</dd></>}
+      </dl>
+      {!detail&&!detailError&&<p className="modal-description">正在加载详情…</p>}
+      {detailError&&<p className="form-error" role="alert">{detailError}</p>}
+      {!!detail&&detail.tasks.length>0&&<div className="detail-tasks"><h3>最近后台任务</h3><ul>{detail.tasks.slice(0,5).map(task=><li key={task.execution_task_id}><code title={task.command}>{task.command}</code><small>{statusText[task.status]||task.status} · {duration(task.runtime_ms||0)}</small></li>)}</ul></div>}
+      {detail&&detailItem.kind==='session'&&!detail.tasks.length&&<p className="modal-description">暂无后台任务记录。</p>}
+    </Modal>;})()}
     {removing&&<Modal title={removing.kind==='workspace'?'移除项目？':'移除会话？'} close={()=>{if(!busy)setRemoving(undefined);}}>
       <p className="modal-description">将 <strong>{removing.label}</strong>{removing.kind==='workspace'?'及其会话从工作台移除。':'从工作台移除。'}项目文件和审计日志不会删除。</p>
       {removing.path&&<code className="remove-path">{removing.path}</code>}
       {removalWorking&&<p className="form-error" role="alert">仍有任务正在工作，请先停止执行再移除。</p>}
+      {removalCommands&&<p className="form-error" role="alert">仍有后台命令在运行，请先结束后再移除。</p>}
       {removeError&&<p className="form-error" role="alert">{removeError}</p>}
-      <footer className="modal-actions"><button className="secondary" disabled={busy} onClick={()=>setRemoving(undefined)}>取消</button><button className="primary destructive-button" disabled={busy||removalWorking} onClick={()=>void remove()}>{busy?'正在移除…':'确认移除'}</button></footer>
+      <footer className="modal-actions"><button className="secondary" disabled={busy} onClick={()=>setRemoving(undefined)}>取消</button><button className="primary destructive-button" disabled={busy||removalWorking||removalCommands} onClick={()=>void remove()}>{busy?'正在移除…':'确认移除'}</button></footer>
     </Modal>}
   </>;
 }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeEvents, timelineEntries, plainTerminal, duration, parseCommandSummary, extractDiffBlocks, parseDiff, countDiffChanges, toolTitle, summaryOf, stripContext, describeReadTargets, describeReadTitle } from './model.ts';
+import { mergeEvents, timelineEntries, plainTerminal, duration, parseCommandSummary, extractDiffBlocks, parseDiff, countDiffChanges, toolTitle, summaryOf, stripContext, describeReadTargets, describeReadTitle, commandOf, commandResultText, isEncodedPayload, stdinOf, workdirOf } from './model.ts';
 const event = (sequence, rest = {}) => ({ sequence, workspace: 'test', type: 'agent.activity', created_at: '2026-09-06T10:00:00Z', ...rest });
 test('SSE replay is deduplicated and ordered', () => {
   assert.deepEqual(mergeEvents([event(3), event(1)], [event(2), event(3, { summary: 'new' })]).map(item => [item.sequence, item.summary]), [[1, undefined], [2, undefined], [3, 'new']]);
@@ -48,6 +48,26 @@ test('command output chunks merge into the owning tool card', () => {
   ]);
   assert.equal(entries.length, 1);
   assert.deepEqual(entries[0].outputs, [{ stream: 'stdout', text: 'one\ntwo' }, { stream: 'stderr', text: 'oops' }]);
+});
+test('native command cards keep their actual command and output after completion', () => {
+  const [entry] = timelineEntries([
+    event(1, { type: 'tool.started', call_id: 'native', tool: 'exec_command', input: { cmd: 'printf 0', workdir: '/project' } }),
+    event(2, { type: 'tool.completed', call_id: 'native', tool: 'exec_command', status: 'succeeded', exit_code: 0, output: { summary: '0\n' } }),
+  ]);
+  assert.equal(commandOf(entry), 'printf 0');
+  assert.equal(workdirOf(entry), '/project');
+  assert.equal(commandResultText(entry), '0');
+  assert.equal(entry.exit_code, 0);
+  assert.equal(commandOf(event(3, { command: 'raw token', input: { cmd: 'redacted command' } })), 'redacted command');
+});
+test('stdin cards distinguish polling, typed input, and encoded payloads', () => {
+  assert.deepEqual(stdinOf(event(1, { input: { session_id: 1222, chars: '' } })), { session: '1222', chars: '', waiting: true });
+  const typed = event(2, { tool: 'write_stdin', status: 'accepted', input: { session_id: 1222, chars: 'hello\n' }, output: { summary: 'hello\n' } });
+  assert.deepEqual(stdinOf(typed), { session: '1222', chars: 'hello\n', waiting: false });
+  assert.equal(commandResultText(typed), '');
+  assert.equal(commandResultText(event(3, { tool: 'write_stdin', status: 'accepted', output: { summary: 'succeeded' } })), '');
+  assert.equal(isEncodedPayload('A'.repeat(512)), true);
+  assert.equal(isEncodedPayload('normal output with spaces '.repeat(20)), false);
 });
 test('orphan command output still renders after the parent card', () => {
   const entries = timelineEntries([event(1, { type: 'tool.completed', call_id: 'a', status: 'succeeded' }), event(2, { type: 'command.output', call_id: 'late', stream: 'stdout', output: { text: 'tail' } })]);

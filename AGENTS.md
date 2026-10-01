@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-MCPX 是运行在开发环境中的 **MCP Runtime（网关）**，Go module 为 `mcpx`，需 **Go 1.26.1+**（以 `go.mod` 为准）。
+MCPX 是运行在开发环境中的 **MCP Runtime（网关）**，Go module 为 `mcpx`，需 **Go 1.27.0+**（以 `go.mod` 为准）。
 
 | 路径 | 说明 |
 |------|------|

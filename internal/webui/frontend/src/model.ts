@@ -1,6 +1,6 @@
 export type AccessMode = 'approval' | 'full_access';
 export interface Workspace { name: string; path: string; description: string; access_mode: AccessMode; pinned?: boolean; position?: number; working_sessions?: number; session_count?: number; active_sessions?: number; last_command_at?: number; is_active?: boolean; preferred_session_id?: string }
-export interface Session { id: string; workspace: string; workspace_path?: string; label: string; description: string; status: string; last_active_at: number; running_tasks: number; running_calls?: number; running_operations?: number; last_command_at?: number; recent_command?: boolean; is_working?: boolean; pinned?: boolean; position?: number }
+export interface Session { id: string; workspace: string; workspace_path?: string; label: string; description: string; status: string; last_active_at: number; last_instruction_at?: number; running_tasks: number; running_calls?: number; running_operations?: number; last_command_at?: number; recent_command?: boolean; is_working?: boolean; pinned?: boolean; position?: number }
 export interface Snapshot { workspaces: Workspace[]; sessions: Session[]; next_offset: number; version: string; sidebar_revision: number; total_sessions: number; removed_session_ids: string[]; server_time?: number }
 export interface Auth { authenticated: boolean; csrf?: string; auth_mode?: string; local?: boolean }
 export interface Task { execution_task_id: string; command: string; status: string; runtime_ms: number; exit_code?: number; log_truncated: boolean }
@@ -140,6 +140,29 @@ export function summaryOf(event: Activity): string {
   const nested = (event.output as { summary?: unknown } | null)?.summary;
   if (typeof nested === 'string' && nested) return nested;
   return event.summary || '';
+}
+export function commandOf(event: Activity): string {
+  const input = event.input as { cmd?: unknown; command?: unknown } | null;
+  return (typeof input?.cmd === 'string' ? input.cmd : '') || (typeof input?.command === 'string' ? input.command : '') || event.command || '';
+}
+export function workdirOf(event: Activity): string {
+  const input = event.input as { workdir?: unknown } | null;
+  return event.working_directory || (typeof input?.workdir === 'string' ? input.workdir : '');
+}
+export function stdinOf(event: Activity): { session: string; chars: string | null; waiting: boolean } {
+  const input = event.input as { session_id?: unknown; chars?: unknown } | null;
+  const session = typeof input?.session_id === 'number' || typeof input?.session_id === 'string' ? String(input.session_id) : '';
+  const chars = typeof input?.chars === 'string' ? input.chars : null;
+  return { session, chars, waiting: chars === null || chars === '' };
+}
+export function commandResultText(event: Activity): string {
+  const text = stripContext(summaryOf(event)).trim();
+  if (!text || /^(succeeded|accepted|started|running)$/i.test(text) || text === event.status || text === `${event.tool} ${event.status}`) return '';
+  if (event.tool === 'write_stdin' && text === stdinOf(event).chars?.trim()) return '';
+  return text;
+}
+export function isEncodedPayload(text: string): boolean {
+  return text.length > 256 && /^[A-Za-z0-9+/=\s]+$/.test(text) && !text.includes(' ');
 }
 const contextPreamble = /^Context:\n(?:- [^\n]*\n)+\n?/;
 export function stripContext(text: string): string { return text.replace(contextPreamble, ''); }

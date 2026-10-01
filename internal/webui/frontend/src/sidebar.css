@@ -73,3 +73,13 @@
  .session-strip { margin-top: 0; margin-bottom: 16px; }.session-chip-select span:not(.status-dot) { max-width: 120px; }
 }
 @media (prefers-reduced-motion: reduce) { .spin { animation: none; }.drag-handle, .row-more { transition: none; } }
+.detail-grid { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 7px 12px; margin: 12px 0 4px; font-size: 12px; }
+.detail-grid dt { color: var(--muted); }
+.detail-grid dd { margin: 0; overflow-wrap: anywhere; }
+.detail-grid code { font: 11px ui-monospace, monospace; color: var(--muted); }
+.detail-tasks { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+.detail-tasks h3 { margin: 0 0 7px; font-size: 12px; }
+.detail-tasks ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.detail-tasks li { display: grid; gap: 2px; font-size: 11px; }
+.detail-tasks li code { font: 11px ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.detail-tasks li small { color: var(--muted); }

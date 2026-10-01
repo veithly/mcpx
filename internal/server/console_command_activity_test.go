@@ -14,10 +14,12 @@ func TestConsoleCommandWindowExcludesPollingAndHasExactBoundary(t *testing.T) {
 		want bool
 	}{
 		{"poll only", consoleSession{LastActive: now, IsWorking: true, RunningCalls: 1}, false},
-		{"inside window", consoleSession{LastCommandAt: now - 179999}, true},
-		{"at boundary", consoleSession{LastCommandAt: now - 180000}, false},
+		{"inside window", consoleSession{LastCommandAt: now - 299999}, true},
+		{"instruction inside window", consoleSession{LastInstructionAt: now - 60000}, true},
+		{"at boundary", consoleSession{LastCommandAt: now - 300000}, false},
 		{"future", consoleSession{LastCommandAt: now + 1}, false},
-		{"long task", consoleSession{RunningTasks: 1, LastCommandAt: now - 900000}, true},
+		{"old background task", consoleSession{RunningTasks: 1, LastCommandAt: now - 900000}, false},
+		{"old instruction and task", consoleSession{RunningTasks: 1, LastCommandAt: now - 900000, LastInstructionAt: now - 900000}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := recentCommand(tc.s, now); got != tc.want {
@@ -105,18 +107,26 @@ func TestConsoleActiveWorkspaceAndPreferredSessionSurvivePagination(t *testing.T
 	}
 	insert("fixture-recent", a, "exited", now-8000, now-2000)
 	insert("fixture-running", b, "running", now-900000, nil)
+	// No recent Agent instruction anywhere: session creation stamps
+	// last_active_at, so backdate every fixture session to keep the activity
+	// verdict driven by the seeded command rows alone.
+	if _, err := rt.state.DB().Exec(`UPDATE remote_sessions SET last_active_at=? WHERE id IN(?,?,?)`, now-900000, a, b, other); err != nil {
+		t.Fatal(err)
+	}
 	requireSidebarStatus(t, mutateSidebar(t, c, "workspace", "beta", "beta", "pin", map[string]any{"pinned": true}), 200)
 	state := getSidebar(t, c, "?limit=1")
-	if state.Workspaces[0].Name != "alpha" || !state.Workspaces[0].IsActive || state.Workspaces[0].ActiveSessions != 2 || state.Workspaces[0].SessionCount != 2 || state.Workspaces[0].PreferredSessionID != b {
+	if state.Workspaces[0].Name != "alpha" || !state.Workspaces[0].IsActive || state.Workspaces[0].ActiveSessions != 1 || state.Workspaces[0].SessionCount != 2 || state.Workspaces[0].PreferredSessionID != a {
 		t.Fatalf("workspace=%+v", state.Workspaces)
 	}
-	if _, err := rt.state.DB().Exec(`UPDATE terminal_tasks SET status='exited',finished_at=? WHERE id='fixture-running'`, now-240000); err != nil {
+	for _, session := range state.Sessions {
+		if session.ID == b && (session.RunningTasks != 0 || session.IsWorking || session.RecentCommand) {
+			t.Fatalf("durable running receipt leaked into live state: %+v", session)
+		}
+	}
+	if _, err := rt.state.DB().Exec(`UPDATE terminal_tasks SET status='exited',finished_at=? WHERE id='fixture-running'`, now-320000); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rt.state.DB().Exec(`UPDATE terminal_tasks SET started_at=?,finished_at=? WHERE id='fixture-recent'`, now-250000, now-240000); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := rt.state.DB().Exec(`UPDATE remote_sessions SET last_active_at=? WHERE id IN(?,?)`, now, a, other); err != nil {
+	if _, err := rt.state.DB().Exec(`UPDATE terminal_tasks SET started_at=?,finished_at=? WHERE id='fixture-recent'`, now-310000, now-300000); err != nil {
 		t.Fatal(err)
 	}
 	state = getSidebar(t, c, "")
@@ -141,6 +151,9 @@ func TestConsoleActiveWorkspaceAndPreferredSessionSurvivePagination(t *testing.T
 	}
 	if detail.Session.ID != b || detail.Session.Workspace != "alpha" {
 		t.Fatalf("wrong session detail %+v", detail)
+	}
+	if detail.Session.RunningTasks != 0 || detail.Session.IsWorking || detail.Session.RecentCommand {
+		t.Fatalf("stale durable task leaked into detail liveness: %+v", detail.Session)
 	}
 	if response := c.request(t, "GET", "detail?workspace=beta&session_id="+b, nil); response.Code == 200 {
 		t.Fatal("cross-workspace session accepted")

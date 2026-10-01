@@ -70,6 +70,74 @@ func TestConsoleInterruptStopsOnlyTargetSessionAndDoesNotRepeat(t *testing.T) {
 	}
 }
 
+func TestConsoleBackgroundCommandDoesNotMasqueradeAsAgentWork(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX process lifecycle test")
+	}
+	rt := newWorkspaceRuntime(t, "alpha")
+	background := consoleRemote(t, rt, "alpha")
+	live := consoleRemote(t, rt, "alpha")
+	ws, _ := rt.reg.Get("alpha")
+	task, err := rt.tasks.StartRemote(context.Background(), background, "alpha", ws.Path, "sleep 20")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = task.Kill() })
+	old := time.Now().Add(-10 * time.Minute).UnixMilli()
+	if _, err = rt.state.DB().Exec(`UPDATE terminal_tasks SET started_at=?,updated_at=? WHERE id=?`, old, old, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The task was started directly through the manager and the live call is
+	// injected below, so no Agent instruction touched either session;
+	// backdate the instruction anchor to model a background process left
+	// running after its Agent turn ended.
+	if _, err = rt.state.DB().Exec(`UPDATE remote_sessions SET last_active_at=? WHERE id IN(?,?)`, old, background, live); err != nil {
+		t.Fatal(err)
+	}
+
+	rt.consoleMu.Lock()
+	rt.consoleCalls = map[string]consoleLiveCall{live: {Workspace: "alpha", Count: 1}}
+	rt.consoleMu.Unlock()
+	c := consoleLogin(t, rt)
+	state := getSidebar(t, c, "")
+	if len(state.Workspaces) != 1 || !state.Workspaces[0].IsActive || state.Workspaces[0].Working != 1 || state.Workspaces[0].ActiveSessions != 1 || state.Workspaces[0].PreferredSessionID != live {
+		t.Fatalf("live workspace state=%+v", state.Workspaces)
+	}
+	var backgroundState, liveState *consoleSession
+	for i := range state.Sessions {
+		session := &state.Sessions[i]
+		switch session.ID {
+		case background:
+			backgroundState = session
+		case live:
+			liveState = session
+		}
+	}
+	if backgroundState == nil || backgroundState.RunningTasks != 1 || backgroundState.IsWorking || backgroundState.RecentCommand {
+		t.Fatalf("background command masqueraded as work: %+v", backgroundState)
+	}
+	if liveState == nil || !liveState.IsWorking || liveState.RunningCalls != 1 {
+		t.Fatalf("real live call missing: %+v", liveState)
+	}
+	if len(state.Sessions) == 0 || state.Sessions[0].ID != live {
+		t.Fatalf("live session not sorted first: %+v", state.Sessions)
+	}
+
+	rt.consoleMu.Lock()
+	delete(rt.consoleCalls, live)
+	rt.consoleMu.Unlock()
+	state = getSidebar(t, c, "")
+	if state.Workspaces[0].Working != 0 || state.Workspaces[0].IsActive {
+		t.Fatalf("background command kept project active: %+v", state.Workspaces[0])
+	}
+	for _, session := range state.Sessions {
+		if session.ID == background && session.RunningTasks != 1 {
+			t.Fatalf("background command disappeared from terminal state: %+v", session)
+		}
+	}
+	requireSidebarStatus(t, mutateSidebar(t, c, "session", background, "alpha", "delete", map[string]any{"confirm": true}), 409)
+}
+
 func TestConsoleSSEReplaysAfterLastEventID(t *testing.T) {
 	rt := newWorkspaceRuntime(t, "alpha", "beta")
 	sid := consoleRemote(t, rt, "alpha")

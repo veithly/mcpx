@@ -189,21 +189,23 @@ func (c *consoleHandler) detail(w http.ResponseWriter, r *http.Request) {
 		var current consoleSession
 		var nativeCommandAt int64
 		err := c.runtime.state.DB().QueryRowContext(r.Context(), `SELECT rs.id,rs.workspace_name,rs.workspace_path,rs.label,rs.description,rs.status,rs.last_active_at,
- (SELECT COUNT(*) FROM terminal_tasks t WHERE t.remote_session_id=rs.id AND t.status='running'),
  (SELECT COUNT(*) FROM operations o WHERE o.remote_session_id=rs.id AND o.state IN ('queued','running')),
  COALESCE((SELECT MAX(MAX(t.started_at,COALESCE(t.finished_at,0))) FROM terminal_tasks t WHERE t.remote_session_id=rs.id),0),
  COALESCE((SELECT MAX(tr.updated_at) FROM tool_results tr WHERE tr.workspace_name=rs.workspace_name AND tr.remote_session_id=rs.id AND tr.updated_at>=? AND tr.tool_name IN ('exec_command','write_stdin','apply_patch')),0)
- FROM remote_sessions rs WHERE rs.id=? AND rs.workspace_name=?`, now-consoleActiveWindowMS, session, ws).Scan(&current.ID, &current.Workspace, &current.Path, &current.Label, &current.Description, &current.Status, &current.LastActive, &current.RunningTasks, &current.RunningOperations, &current.LastCommandAt, &nativeCommandAt)
+ FROM remote_sessions rs WHERE rs.id=? AND rs.workspace_name=?`, now-consoleActiveWindowMS, session, ws).Scan(&current.ID, &current.Workspace, &current.Path, &current.Label, &current.Description, &current.Status, &current.LastActive, &current.RunningOperations, &current.LastCommandAt, &nativeCommandAt)
 		if err != nil {
 			consoleError(w, 404, "session no longer available")
 			return
 		}
-		current.RunningTasks += len(nativeProcesses)
+		current.RunningTasks = c.runtime.tasks.RunningCount(session) + len(nativeProcesses)
 		current.LastCommandAt = max(current.LastCommandAt, nativeCommandAt)
 		c.runtime.consoleMu.Lock()
 		current.RunningCalls = c.runtime.consoleCalls[session].Count
 		c.runtime.consoleMu.Unlock()
-		current.IsWorking = current.RunningTasks+current.RunningCalls+current.RunningOperations > 0
+		current.IsWorking = len(nativeProcesses)+current.RunningCalls+current.RunningOperations > 0
+		// The detail query selects raw rs.last_active_at, which is exactly the
+		// instruction anchor the activity window is computed from.
+		current.LastInstructionAt = current.LastActive
 		current.RecentCommand = recentCommand(current, now)
 		response["session_info"] = current
 	}

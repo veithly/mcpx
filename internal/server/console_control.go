@@ -120,23 +120,7 @@ func (c *consoleHandler) stopSession(ctx context.Context, workspace, session, ta
 	if taskID != "" {
 		ids = append(ids, taskID)
 	} else {
-		rows, err := c.runtime.state.DB().QueryContext(ctx, `SELECT id FROM terminal_tasks WHERE workspace_name=? AND remote_session_id=? AND status='running'`, workspace, session)
-		if err == nil {
-			for rows.Next() {
-				var id string
-				if err = rows.Scan(&id); err != nil {
-					break
-				}
-				ids = append(ids, id)
-			}
-			if err == nil {
-				err = rows.Err()
-			}
-			rows.Close()
-		}
-		if err != nil {
-			failures = append(failures, "cannot enumerate execution tasks")
-		}
+		ids = c.runtime.tasks.RunningTaskIDs(session, workspace)
 	}
 	for _, id := range ids {
 		task, err := c.runtime.tasks.Get(session, id)

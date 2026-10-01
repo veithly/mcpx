@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { Activity as ActivityIcon, Check, ChevronRight, Eye, FileText, Globe, LoaderCircle, MessageSquare, TerminalSquare, TriangleAlert } from 'lucide-react';
-import { argsRows, countDiffChanges, describeEdits, describeReadTargets, describeReadTitle, duration, extractDiffBlocks, parseCommandSummary, parseDiff, plainTerminal, statusText, stripContext, summaryOf, timelineEntries, toolTitle } from './model';
+import { argsRows, commandOf, commandResultText, countDiffChanges, describeEdits, describeReadTargets, describeReadTitle, duration, extractDiffBlocks, isEncodedPayload, parseCommandSummary, parseDiff, plainTerminal, statusText, stdinOf, stripContext, summaryOf, timelineEntries, toolTitle, workdirOf } from './model';
 import type { Activity } from './model';
 
 const activityLabels: Record<string, string> = { intent: '工作目标', hypothesis: '待验证方向', evidence: '新发现', conclusion: '当前结论', next: '下一步', status: '工作状态' };
@@ -8,7 +8,7 @@ const activityLabels: Record<string, string> = { intent: '工作目标', hypothe
 function EventIcon({ event }: { event: Activity }) {
   if (event.status === 'failed') return <TriangleAlert size={16}/>;
   if (event.type === 'tool.started') return <LoaderCircle size={16} className="spin"/>;
-  if (event.command || event.tool === 'execute') return <TerminalSquare size={16}/>;
+  if (event.command || event.tool === 'execute' || event.tool === 'exec_command' || event.tool === 'write_stdin') return <TerminalSquare size={16}/>;
   if (event.tool === 'edit' || event.tool === 'apply_patch' || event.type === 'file.changed' || event.path) return <FileText size={16}/>;
   if (event.tool === 'mcp_tool') return <Globe size={16}/>;
   if (event.tool === 'read') return <Eye size={16}/>;
@@ -27,7 +27,39 @@ function DiffView({ diff }: { diff: string }) {
 
 function StreamView({ stream, text }: { stream: string; text: string }) {
   if (!text.trim()) return null;
-  return <div className={'stream-block ' + stream}><span className="stream-label">{stream === 'stderr' ? '标准错误' : '标准输出'}</span><pre>{plainTerminal(text).replace(/\n$/, '')}</pre></div>;
+  const content = plainTerminal(text).replace(/\n$/, '');
+  const encoded = isEncodedPayload(content);
+  const long = content.length > 2400;
+  return <div className={'stream-block ' + stream}><span className="stream-label">{stream === 'stderr' ? '标准错误' : '标准输出'}</span>
+    {encoded ? <details className="stream-more"><summary>编码数据 · {content.length.toLocaleString('zh-CN')} 字符，展开查看</summary><pre>{content}</pre></details> : <>
+      <pre>{long ? content.slice(0, 1200) + '…' : content}</pre>
+      {long && <details className="stream-more"><summary>展开完整输出 · {content.length.toLocaleString('zh-CN')} 字符</summary><pre>{content}</pre></details>}
+    </>}
+  </div>;
+}
+
+function CommandView({ event }: { event: Activity }) {
+  const command = commandOf(event);
+  if (!command) return null;
+  const workdir = workdirOf(event);
+  const long = command.length > 240 || command.split('\n').length > 3;
+  const preview = command.replace(/\s+/g, ' ').slice(0, 220);
+  return <div className="cmd-row"><div className="cmd-main"><span className="cmd-prompt" aria-hidden="true">$</span>
+    {long ? <details className="command-expand"><summary><code>{preview}…</code><span>展开完整命令</span></summary><pre>{command}</pre></details> : <code>{command}</code>}</div>
+    {(workdir || event.exit_code !== undefined && event.exit_code !== null) && <div className="cmd-meta">
+      {workdir && <span className="cwd-chip" title={workdir}>cwd · {workdir.split('/').filter(Boolean).slice(-1)[0] || workdir}</span>}
+      {event.exit_code !== undefined && event.exit_code !== null && <span className={'exit-chip ' + (event.exit_code === 0 ? 'ok' : 'bad')}>exit {event.exit_code}</span>}
+    </div>}
+  </div>;
+}
+
+function StdinView({ event }: { event: Activity }) {
+  const { session, chars, waiting } = stdinOf(event);
+  const text = chars ?? '';
+  const large = text.length > 240 || isEncodedPayload(text);
+  return <div className="stdin-row"><span className="stdin-action">{waiting ? '等待进程输出' : '发送到进程'}</span>{session && <span className="stdin-session">#{session}</span>}
+    {!waiting && (large ? <span className="stdin-size">{new TextEncoder().encode(text).length.toLocaleString('zh-CN')} 字节输入</span> : <code>{text}</code>)}
+  </div>;
 }
 
 function ResultText({ text }: { text: string }) {
@@ -42,16 +74,21 @@ function ToolBody({ event, onTask }: { event: Activity; onTask: (id: string, ses
   const streams: { stream: string; text: string }[] = [];
   const diffs = event.diffs?.length ? event.diffs : extractDiffBlocks(summary);
   let resultNote: string | null = null;
+  const commandTool = event.tool === 'execute' || event.tool === 'exec_command' || event.tool === 'write_stdin';
 
-  if (event.tool === 'execute') {
+  if (commandTool) {
     const parsed = parseCommandSummary(summary);
-    if (parsed.note) note.push(parsed.note);
+    if (event.tool === 'execute' && parsed.note) note.push(parsed.note);
     const chunks = event.outputs?.filter(chunk => chunk.text.trim()) ?? [];
     if (chunks.length) {
       for (const chunk of chunks) streams.push(chunk);
     } else {
       if (parsed.stdout) streams.push({ stream: 'stdout', text: parsed.stdout });
       if (parsed.stderr) streams.push({ stream: 'stderr', text: parsed.stderr });
+      if (event.tool !== 'execute' && !parsed.stdout && !parsed.stderr) {
+        const text = commandResultText(event);
+        if (text) streams.push({ stream: event.status === 'failed' ? 'stderr' : 'stdout', text });
+      }
     }
   } else if (event.tool === 'edit') {
     resultNote = '文件已按变更写入工作区。';
@@ -59,15 +96,17 @@ function ToolBody({ event, onTask }: { event: Activity; onTask: (id: string, ses
     if (event.outputs?.length) for (const chunk of event.outputs) streams.push(chunk);
   }
   const readTargets = event.tool === 'read' ? describeReadTargets(event.input) : [];
-  const bodyText = event.tool === 'execute' ? '' : summary;
+  const bodyText = commandTool ? '' : summary;
   const showSummary = bodyText && event.tool !== 'edit' && !(event.tool === 'read' && readTargets.length > 0 && event.status === 'succeeded');
   return <>
-    {event.tool === 'execute' && event.command && <div className="cmd-row"><span className="cmd-prompt">$</span><code>{event.command}</code>{event.working_directory && <span className="cwd-chip" title={event.working_directory}>{event.working_directory.split('/').filter(Boolean).slice(-1)[0] || event.working_directory}</span>}{event.exit_code !== undefined && event.exit_code !== null && <span className={'exit-chip ' + (event.exit_code === 0 ? 'ok' : 'bad')}>exit {event.exit_code}</span>}</div>}
+    {(event.tool === 'execute' || event.tool === 'exec_command') && <CommandView event={event}/>}
+    {event.tool === 'write_stdin' && <StdinView event={event}/>}
     {event.tool === 'read' && readTargets.length > 0 && <div className="edit-paths">{readTargets.map(path => <span className="path-chip" key={path}>{path}</span>)}</div>}
     {(event.tool === 'edit' || event.tool === 'apply_patch') && <div className="edit-paths">{describeEdits(event.input).map((line, index) => <span className="path-chip" key={index}>{line}</span>)}{(event.changed_paths ?? (event.path ? [event.path] : [])).map(path => <span className="path-chip" key={path}>{path}</span>)}</div>}
     {event.tool === 'mcp_tool' && argsRows(event.input).length > 0 && <div className="args-table">{argsRows(event.input).map(([key, value]) => value.trim() && <div className="args-row" key={key}><small>{key}</small><code>{value.length > 220 ? value.slice(0, 220) + '…' : value}</code></div>)}</div>}
     {note.map((line, index) => line && <p className="event-note" key={index}>{line}</p>)}
     {streams.map((chunk, index) => <StreamView key={index} stream={chunk.stream} text={chunk.text}/>)}
+    {commandTool && !streams.length && event.status === 'accepted' && <p className="event-note subtle">进程仍在运行，等待后续输出。</p>}
     {!!diffs.length && <div className="diff-group">{(() => { const { added, removed } = countDiffChanges(diffs); return <div className="diff-stat"><FileText size={12}/>{event.changed_paths?.[0] || event.path || '变更'}<em>{added ? ` +${added}` : ''}{removed ? ` −${removed}` : ''}</em></div>; })()}{diffs.map((diff, index) => <DiffView key={index} diff={diff}/>)}</div>}
     {showSummary && <ResultText text={bodyText}/>}
     {resultNote && event.status === 'succeeded' && <p className="event-note subtle">{resultNote}</p>}
@@ -93,19 +132,19 @@ export default function Timeline({ events, hasOlder, loadingOlder, loadOlder, on
       const isActivity = !!event.activity_kind;
       const minor = isMinor(event);
       const isToolCard = event.type === 'tool.started' || event.type === 'tool.completed';
-      const title = isActivity ? activityLabels[event.activity_kind!] || event.activity_kind : event.type === 'file.changed' ? '文件变更' : event.tool === 'read' ? describeReadTitle(event.input) : toolTitle(event);
+      const title = isActivity ? activityLabels[event.activity_kind!] || event.activity_kind : event.type === 'file.changed' ? '文件变更' : event.tool === 'read' ? describeReadTitle(event.input) : event.tool === 'write_stdin' && stdinOf(event).waiting ? '等待命令输出' : toolTitle(event);
       const purpose = event.purpose || event.intent || '';
       const hasRaw = isToolCard && (!!event.input || !!event.output);
       const body = <ToolBody event={event} onTask={onTask}/>;
       return <article className={'timeline-entry ' + (isActivity ? 'agent-entry ' : '') + (minor ? 'minor-entry ' : '') + (event.status === 'failed' ? ' error-entry' : '')} key={event.sequence}>
         <div className="event-symbol">{isActivity ? <ActivityIcon size={16}/> : <EventIcon event={event}/>}</div>
         <div className="event-body">
-          <header><span className="event-title">{title}</span><StatusPill status={event.status}/>{event.duration_ms !== undefined && !minor && <span className="event-duration">{duration(event.duration_ms)}</span>}<span className="event-time">{new Date(event.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span></header>
+          <header><span className="event-title">{title}</span><StatusPill status={event.status === 'accepted' && (event.tool === 'exec_command' || event.tool === 'write_stdin') ? 'running' : event.status}/>{event.duration_ms !== undefined && !minor && <span className="event-duration">{duration(event.duration_ms)}</span>}<span className="event-time">{new Date(event.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span></header>
           {purpose && !minor && <p className="event-purpose" title={purpose}>{purpose}</p>}
           {!isActivity && !minor && body}
           {isActivity && <ActivityBody event={event}/>}
           {minor && <p className="event-summary">{event.summary}</p>}
-          {hasRaw && <details className="event-details"><summary>原始事件数据</summary>{event.input !== undefined && <><small>INPUT</small><pre>{JSON.stringify(event.input, null, 2)}</pre></>}{event.output !== undefined && <><small>OUTPUT</small><pre>{JSON.stringify(event.output, null, 2)}</pre></>}{event.truncated && <p>大段数据已截断，完整结果可通过 observe 获取。</p>}</details>}
+          {hasRaw && <details className="event-details"><summary>原始事件数据</summary>{event.input !== undefined && <><small>调用参数</small><pre>{JSON.stringify(event.input, null, 2)}</pre></>}{event.output !== undefined && <><small>返回数据</small><pre>{JSON.stringify(event.output, null, 2)}</pre></>}{event.truncated && <p>大段数据已截断，完整结果可通过 observe 获取。</p>}</details>}
         </div>
       </article>;
     })}

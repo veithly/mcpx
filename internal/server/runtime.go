@@ -97,6 +97,7 @@ type Runtime struct {
 	processMu         sync.Mutex
 	processLifecycle  sync.RWMutex
 	processClients    map[string]*unifiedexec.Client
+	openAITunnel      *openAITunnelRuntime
 
 	// For schema revision and capability catalog.
 	toolIndex          map[string]mcp.Tool
@@ -505,10 +506,20 @@ func (r *Runtime) Start() error {
 	// idling through the drain window (http.Server.Shutdown never cancels
 	// in-flight request contexts), then drain in-flight tool calls so long
 	// tasks receive their responses, then release durable resources.
+	// Bind first: a port conflict must not briefly activate a remote tunnel.
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	if err := r.startOpenAITunnel(s); err != nil {
+		return err
+	}
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.ListenAndServe() }()
+	go func() { serveErr <- srv.Serve(listener) }()
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(stop)
 	select {
 	case err := <-serveErr:
 		return err
@@ -532,6 +543,9 @@ func (r *Runtime) Close() error {
 	}
 	r.closeOnce.Do(func() {
 		r.closeProcessClients()
+		if err := r.openAITunnel.Close(); err != nil {
+			r.closeErr = err
+		}
 		r.stopRetention()
 		if r.observation != nil && r.observation.async != nil {
 			// 0 selects the recorder's default drain floor (5s): a full queue

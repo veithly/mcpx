@@ -23,21 +23,26 @@ type consoleWorkspace struct {
 	PreferredSessionID string `json:"preferred_session_id"`
 }
 type consoleSession struct {
-	ID                string `json:"id"`
-	Workspace         string `json:"workspace"`
-	Path              string `json:"workspace_path"`
-	Label             string `json:"label"`
-	Description       string `json:"description"`
-	Status            string `json:"status"`
-	LastActive        int64  `json:"last_active_at"`
-	LastCommandAt     int64  `json:"last_command_at"`
-	RecentCommand     bool   `json:"recent_command"`
-	RunningTasks      int    `json:"running_tasks"`
-	RunningCalls      int    `json:"running_calls"`
-	RunningOperations int    `json:"running_operations"`
-	IsWorking         bool   `json:"is_working"`
-	Pinned            bool   `json:"pinned"`
-	Position          int    `json:"position"`
+	ID          string `json:"id"`
+	Workspace   string `json:"workspace"`
+	Path        string `json:"workspace_path"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	LastActive  int64  `json:"last_active_at"`
+	// LastInstructionAt is the raw remote_sessions.last_active_at stamp — the
+	// last real Agent-driven instruction (any MCP tool call refreshes it via
+	// throttled Touch; console HTTP reads never do). Display LastActive also
+	// folds in observation event times, so it must not anchor the window.
+	LastInstructionAt int64 `json:"last_instruction_at"`
+	LastCommandAt     int64 `json:"last_command_at"`
+	RecentCommand     bool  `json:"recent_command"`
+	RunningTasks      int   `json:"running_tasks"`
+	RunningCalls      int   `json:"running_calls"`
+	RunningOperations int   `json:"running_operations"`
+	IsWorking         bool  `json:"is_working"`
+	Pinned            bool  `json:"pinned"`
+	Position          int   `json:"position"`
 }
 
 func sidebarKey(kind, id string) string { return kind + ":" + id }
@@ -110,8 +115,8 @@ func (c *consoleHandler) snapshot(ctx context.Context) ([]consoleWorkspace, []co
 		workspaces = append(workspaces, consoleWorkspace{Name: ws.Name, Path: ws.Path, Description: ws.Description, Mode: mode, Pinned: pref.Pinned, Position: pref.Position})
 	}
 	rows, err := r.state.DB().QueryContext(ctx, `SELECT rs.id,rs.workspace_name,rs.workspace_path,rs.label,rs.description,rs.status,
+ rs.last_active_at,
  MAX(rs.last_active_at, COALESCE((SELECT MAX(e.created_at) FROM observation_events e WHERE e.remote_session_id=rs.id),0)),
- (SELECT COUNT(*) FROM terminal_tasks t WHERE t.remote_session_id=rs.id AND t.status='running'),
  (SELECT COUNT(*) FROM operations o WHERE o.remote_session_id=rs.id AND o.state IN ('queued','running')),
  COALESCE((SELECT MAX(MAX(t.started_at,COALESCE(t.finished_at,0))) FROM terminal_tasks t WHERE t.remote_session_id=rs.id),0),
  COALESCE((SELECT MAX(tr.updated_at) FROM tool_results tr WHERE tr.workspace_name=rs.workspace_name AND tr.remote_session_id=rs.id AND tr.updated_at>=? AND tr.tool_name IN ('exec_command','write_stdin','apply_patch')),0)
@@ -125,11 +130,11 @@ func (c *consoleHandler) snapshot(ctx context.Context) ([]consoleWorkspace, []co
 	for rows.Next() {
 		var s consoleSession
 		var nativeCommandAt int64
-		if err = rows.Scan(&s.ID, &s.Workspace, &s.Path, &s.Label, &s.Description, &s.Status, &s.LastActive, &s.RunningTasks, &s.RunningOperations, &s.LastCommandAt, &nativeCommandAt); err != nil {
+		if err = rows.Scan(&s.ID, &s.Workspace, &s.Path, &s.Label, &s.Description, &s.Status, &s.LastInstructionAt, &s.LastActive, &s.RunningOperations, &s.LastCommandAt, &nativeCommandAt); err != nil {
 			rows.Close()
 			return nil, nil, state, err
 		}
-		s.RunningTasks += len(nativeProcesses[s.ID])
+		s.RunningTasks = r.tasks.RunningCount(s.ID) + len(nativeProcesses[s.ID])
 		s.LastCommandAt = max(s.LastCommandAt, nativeCommandAt)
 		pref := prefs[sidebarKey("session", s.ID)]
 		if pref.DeletedAt > 0 || !visible[s.Workspace] {
@@ -138,7 +143,10 @@ func (c *consoleHandler) snapshot(ctx context.Context) ([]consoleWorkspace, []co
 		s.Pinned = pref.Pinned
 		s.Position = pref.Position
 		s.RunningCalls = r.consoleCalls[s.ID].Count
-		s.IsWorking = s.RunningTasks+s.RunningCalls+s.RunningOperations > 0
+		// Terminal processes can intentionally outlive the Agent turn that started
+		// them. Keep their count for Terminal/detail, but do not make that historical
+		// session look like live Agent work indefinitely.
+		s.IsWorking = len(nativeProcesses[s.ID])+s.RunningCalls+s.RunningOperations > 0
 		s.RecentCommand = recentCommand(s, now)
 		if s.IsWorking {
 			working[s.Workspace]++
@@ -158,7 +166,7 @@ func (c *consoleHandler) snapshot(ctx context.Context) ([]consoleWorkspace, []co
 		ws.SessionCount = len(members)
 		for _, s := range members {
 			ws.LastCommandAt = max(ws.LastCommandAt, s.LastCommandAt)
-			if s.RecentCommand {
+			if s.RecentCommand || s.IsWorking {
 				ws.ActiveSessions++
 			}
 		}
@@ -185,18 +193,21 @@ func (c *consoleHandler) snapshot(ctx context.Context) ([]consoleWorkspace, []co
 	return workspaces, sessions, state, nil
 }
 
-const consoleActiveWindowMS int64 = 3 * 60 * 1000
+const consoleActiveWindowMS int64 = 5 * 60 * 1000
 
-// Read/poll events never renew command activity. Long-running commands remain active.
+// Activity is instruction-driven: any real Agent instruction (MCP tool call —
+// command, edit, read, observe — via throttled Touch) or command start/finish
+// inside this window keeps the session/project active. A child process that
+// merely keeps running afterwards stays visible in Terminal but never renews
+// the window; HTTP console reads, log reads and sidebar polling never renew it
+// either. Every sidebar refresh recomputes from these anchors.
 func recentCommand(s consoleSession, now int64) bool {
-	return s.RunningTasks > 0 || (s.LastCommandAt > 0 && s.LastCommandAt <= now && now-s.LastCommandAt < consoleActiveWindowMS)
+	anchor := max(s.LastCommandAt, s.LastInstructionAt)
+	return anchor > 0 && anchor <= now && now-anchor < consoleActiveWindowMS
 }
 
 // Resolve over all sessions before pagination; never switch an open view on poll.
 func preferredSessionLess(a, b consoleSession) bool {
-	if (a.RunningTasks > 0) != (b.RunningTasks > 0) {
-		return a.RunningTasks > 0
-	}
 	if a.IsWorking != b.IsWorking {
 		return a.IsWorking
 	}
